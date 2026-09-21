@@ -126,15 +126,16 @@ def main():
     if not vlm_report_csv.exists():
         if not audit_manifest_csv.exists():
             run("aerial_phenology_audit.py", "manifest", "--source", tifs, "--jpegs", jpegs, "--phenology", pheno_csv, "--metadata", tif_metadata, "--output", audit_manifest_csv, cwd=output)
-        manifest["stages"]["audit_manifest"] = {"output": str(audit_manifest_csv)}
 
         run("aerial_phenology_audit.py", "phenology-run", "--manifest", audit_manifest_csv, "--attempts", vlm_attempts, "--endpoint", args.vlm_endpoint, "--model", args.vlm_model, "--workers", args.vlm_workers, "--priorities", "in_season", cwd=output)
-        manifest["stages"]["vlm_run"] = {"attempts": str(vlm_attempts), "model": args.vlm_model}
 
         if vlm_images.exists() and any(vlm_images.iterdir()):
             shutil.rmtree(vlm_images)
         run("aerial_phenology_audit.py", "phenology-report", "--manifest", audit_manifest_csv, "--attempts", vlm_attempts, "--output", vlm_report_csv, "--images", vlm_images, cwd=output)
-        manifest["stages"]["vlm_report"] = {"output": str(vlm_report_csv), "images": str(vlm_images)}
+
+    manifest["stages"]["audit_manifest"] = {"output": str(audit_manifest_csv)}
+    manifest["stages"]["vlm_run"] = {"attempts": str(vlm_attempts), "model": args.vlm_model}
+    manifest["stages"]["vlm_report"] = {"output": str(vlm_report_csv), "images": str(vlm_images)}
 
     manifest["finished_at"] = datetime.now(timezone.utc).isoformat()
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
