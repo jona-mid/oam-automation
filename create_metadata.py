@@ -237,6 +237,8 @@ def cmd_jpeg(args):
             "acquisition_date": acquisition_date,
             "platform": platform,
             "licence": "CC BY",
+            "oam_id": match.get("_id", ""),
+            "property_license": match.get("property_license", ""),
             "authors": "Contributors of Open Imagery Network",
             "additional_information": additional_info,
             "gsd": match.get("gsd", ""),
