@@ -8,4 +8,5 @@ xarray
 zarr
 rich
 Pillow
+pydantic
 

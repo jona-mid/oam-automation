@@ -38,6 +38,9 @@ def main():
     parser.add_argument("--thumbnail-workers", type=int, default=8)
     parser.add_argument("--tif-workers", type=int, default=8)
     parser.add_argument("--jpeg-workers", type=int, default=2)
+    parser.add_argument("--vlm-endpoint", default="https://openrouter.ai/api/v1/chat/completions")
+    parser.add_argument("--vlm-model", default="google/gemini-3-flash-preview")
+    parser.add_argument("--vlm-workers", type=int, default=4)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -113,6 +116,26 @@ def main():
     if not jpeg_metadata.exists():
         run("create_metadata.py", "jpeg", "--source-metadata", tif_metadata, "--jpeg-folder", jpegs, "--output-metadata", jpeg_metadata, cwd=output)
     manifest["stages"]["metadata"] = {"tif": str(tif_metadata), "jpeg": str(jpeg_metadata)}
+
+    # VLM audit stages
+    audit_manifest_csv = metadata / "audit_manifest.csv"
+    vlm_attempts = logs / "phenology-attempts.jsonl"
+    vlm_report_csv = metadata / "phenology_report.csv"
+    vlm_images = output / "vlm_images"
+
+    if not vlm_report_csv.exists():
+        if not audit_manifest_csv.exists():
+            run("aerial_phenology_audit.py", "manifest", "--source", tifs, "--jpegs", jpegs, "--phenology", pheno_csv, "--metadata", tif_metadata, "--output", audit_manifest_csv, cwd=output)
+        manifest["stages"]["audit_manifest"] = {"output": str(audit_manifest_csv)}
+
+        run("aerial_phenology_audit.py", "phenology-run", "--manifest", audit_manifest_csv, "--attempts", vlm_attempts, "--endpoint", args.vlm_endpoint, "--model", args.vlm_model, "--workers", args.vlm_workers, "--priorities", "in_season", cwd=output)
+        manifest["stages"]["vlm_run"] = {"attempts": str(vlm_attempts), "model": args.vlm_model}
+
+        if vlm_images.exists() and any(vlm_images.iterdir()):
+            shutil.rmtree(vlm_images)
+        run("aerial_phenology_audit.py", "phenology-report", "--manifest", audit_manifest_csv, "--attempts", vlm_attempts, "--output", vlm_report_csv, "--images", vlm_images, cwd=output)
+        manifest["stages"]["vlm_report"] = {"output": str(vlm_report_csv), "images": str(vlm_images)}
+
     manifest["finished_at"] = datetime.now(timezone.utc).isoformat()
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(f"Pipeline complete. Manifest: {manifest_path}")

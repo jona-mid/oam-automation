@@ -308,6 +308,17 @@ def process_bboxes_from_csv(
     df["pheno_end_doy"] = pheno_ends
     df["pheno_season"] = pheno_seasons
 
+    # Derived audit columns
+    def _derive_filename(row):
+        pf = row.get("property_filename")
+        if isinstance(pf, str) and pf.strip():
+            return Path(pf.replace("\\", "/")).name
+        return Path(str(row.get("uuid", "")).replace("\\", "/")).name
+
+    df["filename"] = df.apply(_derive_filename, axis=1)
+    df["classification"] = df["pheno_season"]
+    df["jpeg_filename"] = df["filename"].str.replace(r"\.tiff?$", ".jpeg", regex=True)
+
     # Save output
     if output_path is None:
         output_path = csv_path

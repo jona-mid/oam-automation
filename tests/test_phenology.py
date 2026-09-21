@@ -229,3 +229,54 @@ class TestProcessBboxesFromCsv:
 
         assert len(df) == 1
         assert "bbox_min_lon" in df.columns
+
+
+class TestDerivedAuditColumns:
+    """Tests for the derived audit columns (filename, classification, jpeg_filename)."""
+
+    def test_derived_columns_from_property_filename(self, tmp_path):
+        """filename derives from property_filename, classification from pheno_season."""
+        import pandas as pd
+        from unittest.mock import patch, MagicMock
+        from phenology import process_bboxes_from_csv
+
+        csv_file = tmp_path / "test.csv"
+        csv_file.write_text(
+            "uuid,property_filename,bbox_min_lon,bbox_min_lat,bbox_max_lon,bbox_max_lat,acquisition_start\n"
+            "https://example.com/abc.tif,def.tif,-122.5,37.5,-122.0,38.0,2025-06-15\n"
+        )
+        out_file = tmp_path / "out.csv"
+
+        mock_pheno = MagicMock()
+        mock_pheno.shape = (420, 1080, 6)
+        with patch("phenology.load_phenology_data", return_value=mock_pheno), \
+             patch("phenology.extract_phenology_for_bbox", return_value=(100.0, 200.0)):
+            process_bboxes_from_csv(str(csv_file), str(out_file), pad_days=0)
+
+        df = pd.read_csv(out_file)
+        assert df.loc[0, "filename"] == "def.tif"
+        assert df.loc[0, "classification"] == "in_season"
+        assert df.loc[0, "jpeg_filename"] == "def.jpeg"
+
+    def test_derived_filename_falls_back_to_uuid(self, tmp_path):
+        """filename falls back to uuid basename when property_filename is missing."""
+        import pandas as pd
+        from unittest.mock import patch, MagicMock
+        from phenology import process_bboxes_from_csv
+
+        csv_file = tmp_path / "test.csv"
+        csv_file.write_text(
+            "uuid,bbox_min_lon,bbox_min_lat,bbox_max_lon,bbox_max_lat,acquisition_start\n"
+            "https://oin-hotosm-temp.s3.amazonaws.com/xyz/0/abc123.tif,-122.5,37.5,-122.0,38.0,2025-06-15\n"
+        )
+        out_file = tmp_path / "out.csv"
+
+        mock_pheno = MagicMock()
+        mock_pheno.shape = (420, 1080, 6)
+        with patch("phenology.load_phenology_data", return_value=mock_pheno), \
+             patch("phenology.extract_phenology_for_bbox", return_value=(100.0, 200.0)):
+            process_bboxes_from_csv(str(csv_file), str(out_file), pad_days=0)
+
+        df = pd.read_csv(out_file)
+        assert df.loc[0, "filename"] == "abc123.tif"
+        assert df.loc[0, "jpeg_filename"] == "abc123.jpeg"
