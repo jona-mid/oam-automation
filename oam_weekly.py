@@ -33,8 +33,15 @@ LEDGER_COLUMNS = [
     "additional_information",
     "citation_doi",
 ]
-VALID_LICENSES = {"CC BY", "CC BY-SA", "CC BY-NC-SA", "CC BY-NC", "MIT"}
 VALID_PLATFORMS = {"drone", "airborne"}
+# OAM property_license strings -> deadtrees LicenseEnum values. Unknown values fail closed.
+OAM_LICENSE_MAP = {
+    "CC-BY 4.0": "CC BY",
+    "CC BY-SA 4.0": "CC BY-SA",
+    "CC BY-NC 4.0": "CC BY-NC",
+    "CC BY-NC-SA 4.0": "CC BY-NC-SA",
+    "MIT": "MIT",
+}
 
 
 def run_pipeline(repo_root: Path, run_dir: Path) -> None:
@@ -49,10 +56,19 @@ def load_gate_candidates(run_dir: Path) -> pd.DataFrame:
     jpeg_meta = pd.read_csv(run_dir / "metadata" / "jpeg_metadata.csv")
     # Both sides carry a `platform` column; keep the jpeg-metadata names clean.
     joined = report.merge(jpeg_meta, on="filename", how="inner", suffixes=("_report", ""))
-    return joined[
-        (joined["modis_category"] == "in_season")
-        & (joined["tree_canopy_leaf_state"] == "leaf_on")
-        & (joined["review_status"] == "success")
+    # The real license provenance lives only in the tif metadata (OAM property_license).
+    # The upstream tif mode appends existing rows on rebuild, so deduplicate defensively.
+    tif_licenses = (
+        pd.read_csv(run_dir / "metadata" / "tif_metadata.csv", dtype=str)[
+            ["filename", "property_license"]
+        ]
+        .drop_duplicates(subset="filename")
+    )
+    licensed = joined.merge(tif_licenses, on="filename", how="inner")
+    return licensed[
+        (licensed["modis_category"] == "in_season")
+        & (licensed["tree_canopy_leaf_state"] == "leaf_on")
+        & (licensed["review_status"] == "success")
     ]
 
 
@@ -71,30 +87,38 @@ def format_en_date(value: date) -> str:
 
 def build_upload_kwargs(row: pd.Series, run_date: date) -> dict:
     """Build deadtrees-cli upload kwargs from a joined candidate row. Fails closed on unknown values."""
-    additional = row["additional_information"]
-    additional = "" if pd.isna(additional) else str(additional)
-    additional = re.sub(
-        r"Accessed [A-Za-z]+ \d{1,2}, \d{4}",
-        f"Accessed {format_en_date(run_date)}",
-        additional,
-    )
     acquisition_raw = row["acquisition_date"]
     if pd.isna(acquisition_raw) or not str(acquisition_raw).strip():
         raise ValueError("missing acquisition_date")
     acquisition = datetime.strptime(str(acquisition_raw).strip(), "%Y-%m-%d").date()
     platform = str(row["platform"]).strip().lower()
-    license_str = str(row["licence"]).strip()
     authors = row["authors"]
     if pd.isna(authors) or not str(authors).strip():
         raise ValueError("missing authors")
     if platform not in VALID_PLATFORMS:
         raise ValueError(f"unknown platform value: {platform!r}")
-    if license_str not in VALID_LICENSES:
-        raise ValueError(f"unknown license value: {license_str!r}")
+
+    raw_license = row["property_license"]
+    if pd.isna(raw_license) or not str(raw_license).strip():
+        raise ValueError("missing property_license")
+    raw_license = str(raw_license).strip()
+    if raw_license not in OAM_LICENSE_MAP:
+        raise ValueError(f"unknown OAM license value: {raw_license!r}")
+
+    additional = row["additional_information"]
+    id_match = re.search(r"meta\?_id=([A-Za-z0-9]+)", "" if pd.isna(additional) else str(additional))
+    if not id_match:
+        raise ValueError("missing OAM _id in additional_information")
+    additional = (
+        "This orthophoto data is available through OpenAerialMap, provided by Contributors "
+        f"of Open Imagery Network. Licensed under {raw_license}. More information about this "
+        f"dataset: https://api.openaerialmap.org/meta?_id={id_match.group(1)} "
+        f"Accessed {format_en_date(run_date)}."
+    )
     return {
         "authors": [str(authors)],
         "platform": platform,
-        "license": license_str,
+        "license": OAM_LICENSE_MAP[raw_license],
         "data_access": "public",
         "acquisition_year": acquisition.year,
         "acquisition_month": acquisition.month,

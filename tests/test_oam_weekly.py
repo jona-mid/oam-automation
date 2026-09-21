@@ -32,15 +32,29 @@ META_HEADER = [
     "authors",
     "additional_information",
 ]
+TIF_META_HEADER = ["filename", "property_license"]
+SAMPLE_ADDITIONAL = (
+    "This orthophoto data is available through OpenAerialMap, provided by Contributors of "
+    "Open Imagery Network. More information: https://api.openaerialmap.org/meta?_id=abc123 Accessed December 4, 2025."
+)
+
+
+def _write_trial_metadata(tmp_path, report_rows, meta_rows, tif_rows=None):
+    metadata_dir = tmp_path / "metadata"
+    metadata_dir.mkdir()
+    _write_csv(metadata_dir / "phenology_report.csv", REPORT_HEADER, report_rows)
+    _write_csv(metadata_dir / "jpeg_metadata.csv", META_HEADER, meta_rows)
+    _write_csv(
+        metadata_dir / "tif_metadata.csv",
+        TIF_META_HEADER,
+        tif_rows if tif_rows is not None else [[name, "CC-BY 4.0"] for name, *_ in report_rows],
+    )
 
 
 class TestLoadGateCandidates:
     def test_gate_keeps_only_in_season_leaf_on_success(self, tmp_path):
-        metadata_dir = tmp_path / "metadata"
-        metadata_dir.mkdir()
-        _write_csv(
-            metadata_dir / "phenology_report.csv",
-            REPORT_HEADER,
+        _write_trial_metadata(
+            tmp_path,
             [
                 ["a.tif", "in_season", "leaf_on", "success", "drone"],
                 ["b.tif", "in_season", "not_leaf_on", "success", "drone"],
@@ -48,49 +62,46 @@ class TestLoadGateCandidates:
                 ["d.tif", "in_season", "leaf_on", "unavailable", "drone"],
                 ["e.tif", "in_season", "leaf_on", "success", "drone"],
             ],
-        )
-        _write_csv(
-            metadata_dir / "jpeg_metadata.csv",
-            META_HEADER,
             [
-                ["a.tif", "2026-09-11", "drone", "CC BY", "Contributors of Open Imagery Network", "info a"],
-                ["b.tif", "2026-09-11", "drone", "CC BY", "Contributors of Open Imagery Network", "info b"],
-                ["c.tif", "2026-09-11", "drone", "CC BY", "Contributors of Open Imagery Network", "info c"],
-                ["e.tif", "2026-09-12", "drone", "CC BY", "Contributors of Open Imagery Network", "info e"],
+                ["a.tif", "2026-09-11", "drone", "CC BY", "Contributors of Open Imagery Network", SAMPLE_ADDITIONAL],
+                ["b.tif", "2026-09-11", "drone", "CC BY", "Contributors of Open Imagery Network", SAMPLE_ADDITIONAL],
+                ["c.tif", "2026-09-11", "drone", "CC BY", "Contributors of Open Imagery Network", SAMPLE_ADDITIONAL],
+                ["e.tif", "2026-09-12", "drone", "CC BY", "Contributors of Open Imagery Network", SAMPLE_ADDITIONAL],
             ],
         )
         gate = oam_weekly.load_gate_candidates(tmp_path)
         assert sorted(gate["filename"]) == ["a.tif", "e.tif"]
 
     def test_join_drops_rows_without_jpeg_metadata(self, tmp_path):
-        metadata_dir = tmp_path / "metadata"
-        metadata_dir.mkdir()
-        _write_csv(
-            metadata_dir / "phenology_report.csv",
-            REPORT_HEADER,
+        _write_trial_metadata(
+            tmp_path,
             [["a.tif", "in_season", "leaf_on", "success", "drone"]],
+            [],
         )
-        _write_csv(metadata_dir / "jpeg_metadata.csv", META_HEADER, [])
         gate = oam_weekly.load_gate_candidates(tmp_path)
         assert len(gate) == 0
 
     def test_overlapping_platform_column_keeps_jpeg_metadata_name(self, tmp_path):
         """Both CSVs carry `platform`; the jpeg-metadata value must survive the merge."""
-        metadata_dir = tmp_path / "metadata"
-        metadata_dir.mkdir()
-        _write_csv(
-            metadata_dir / "phenology_report.csv",
-            REPORT_HEADER,
+        _write_trial_metadata(
+            tmp_path,
             [["a.tif", "in_season", "leaf_on", "success", "drone"]],
-        )
-        _write_csv(
-            metadata_dir / "jpeg_metadata.csv",
-            META_HEADER,
-            [["a.tif", "2026-09-11", "drone", "CC BY", "Contributors of Open Imagery Network", "info"]],
+            [["a.tif", "2026-09-11", "drone", "CC BY", "Contributors of Open Imagery Network", SAMPLE_ADDITIONAL]],
         )
         gate = oam_weekly.load_gate_candidates(tmp_path)
         kwargs = oam_weekly.build_upload_kwargs(gate.iloc[0], date(2026, 9, 21))
         assert kwargs["platform"] == "drone"
+
+    def test_duplicated_tif_metadata_rows_do_not_multiply_candidates(self, tmp_path):
+        """The upstream tif mode appends existing rows on rebuild; dedup must keep one row per file."""
+        _write_trial_metadata(
+            tmp_path,
+            [["a.tif", "in_season", "leaf_on", "success", "drone"]],
+            [["a.tif", "2026-09-11", "drone", "CC BY", "Contributors of Open Imagery Network", SAMPLE_ADDITIONAL]],
+            tif_rows=[["a.tif", "CC-BY 4.0"], ["a.tif", "CC-BY 4.0"], ["a.tif", "CC-BY 4.0"]],
+        )
+        gate = oam_weekly.load_gate_candidates(tmp_path)
+        assert len(gate) == 1
 
 
 class TestLoadLedgerFilenames:
@@ -111,10 +122,8 @@ class TestBuildUploadKwargs:
             "platform": "drone",
             "licence": "CC BY",
             "authors": "Contributors of Open Imagery Network",
-            "additional_information": (
-                "This orthophoto data is available through OpenAerialMap. "
-                "More information: https://api.openaerialmap.org/meta?_id=x Accessed December 4, 2025."
-            ),
+            "additional_information": SAMPLE_ADDITIONAL,
+            "property_license": "CC-BY 4.0",
         }
         base.update(overrides)
         return pd.Series(base)
@@ -130,14 +139,39 @@ class TestBuildUploadKwargs:
         assert kwargs["acquisition_day"] == 11
         assert kwargs["citation_doi"] is None
 
-    def test_accessed_fragment_replaced_with_run_date(self):
+    def test_additional_information_uses_locked_template(self):
         kwargs = oam_weekly.build_upload_kwargs(self._row(), date(2026, 9, 21))
-        assert "Accessed December 4, 2025" not in kwargs["additional_information"]
-        assert "Accessed September 21, 2026" in kwargs["additional_information"]
+        expected = (
+            "This orthophoto data is available through OpenAerialMap, provided by Contributors "
+            "of Open Imagery Network. Licensed under CC-BY 4.0. More information about this "
+            "dataset: https://api.openaerialmap.org/meta?_id=abc123 Accessed September 21, 2026."
+        )
+        assert kwargs["additional_information"] == expected
+
+    def test_non_cc_by_license_maps_and_keeps_raw_sentence(self):
+        kwargs = oam_weekly.build_upload_kwargs(
+            self._row(property_license="CC BY-SA 4.0"), date(2026, 9, 21)
+        )
+        assert kwargs["license"] == "CC BY-SA"
+        assert "Licensed under CC BY-SA 4.0." in kwargs["additional_information"]
 
     def test_unknown_license_fails_closed(self):
-        with pytest.raises(ValueError, match="unknown license"):
-            oam_weekly.build_upload_kwargs(self._row(licence="Public Domain"), date(2026, 9, 21))
+        with pytest.raises(ValueError, match="unknown OAM license"):
+            oam_weekly.build_upload_kwargs(
+                self._row(property_license="Public Domain"), date(2026, 9, 21)
+            )
+
+    def test_missing_property_license_fails_closed(self):
+        with pytest.raises(ValueError, match="property_license"):
+            oam_weekly.build_upload_kwargs(
+                self._row(property_license=None), date(2026, 9, 21)
+            )
+
+    def test_missing_oam_id_fails_closed(self):
+        with pytest.raises(ValueError, match="_id"):
+            oam_weekly.build_upload_kwargs(
+                self._row(additional_information="no url here"), date(2026, 9, 21)
+            )
 
     def test_unknown_platform_fails_closed(self):
         with pytest.raises(ValueError, match="unknown platform"):
