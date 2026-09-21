@@ -2,6 +2,8 @@
 
 Patched copy of `openaerialmap_scraper_clean` for automated OAM fetching, phenology classification, and upload to deadtrees.earth.
 
+**This repo is canonical** for the automation effort. Upstream fixes are not synced automatically; make all changes here.
+
 ## Patches applied (WP-01)
 
 1. **v3 MODIS zarr**: Replaces buggy v2 (any-NaN interpolation) with corrected v3 (all-NaN interpolation).
@@ -19,13 +21,18 @@ scrape -> filter -> phenology -> thumbnails -> tifs -> jpegs -> metadata
 
 - Tool: `aerial_phenology_audit.py` (copied from `aerial-phenology-audit/`, unmodified).
 - Model: `google/gemini-3-flash-preview` via OpenRouter (~$0.0008/image, 2-6s/image).
-- Requires env var `OPENROUTER_API_KEY`. Missing key fails closed (the upload gate cannot be verified without it).
+- Requires env var `OPENROUTER_API_KEY`. Missing key fails closed (the upload gate cannot be verified without it). Current key location on this machine: `C:\Users\jonathan\Documents\HiWi\georeferencing\georef_check_vlm\.env`. WP-03 must give the key a proper home on the scheduler host (systemd `EnvironmentFile=`).
 - `--vlm-endpoint` must be the FULL chat completions URL (`https://openrouter.ai/api/v1/chat/completions`); the tool posts to it as-is.
 - Only `in_season` images are reviewed (`--priorities in_season`); out-of-season images never reach upload.
 - `phenology.py` derives `filename`, `classification`, and `jpeg_filename` columns so the manifest reads `phenology.csv` directly (no adapter).
 - `phenology-run` is resumable: re-runs skip images with recorded successes ($0 re-run cost).
 - Upload gate (WP-02, not yet built): MODIS `in_season` AND VLM `leaf_on` AND `review_status == success`.
 
-## Original repo
+## Upstream sources
 
-`C:\Users\jonathan\Documents\HiWi\openaerialmap_scraper_clean` is untouched. All changes live here.
+Two upstreams, both frozen (not synced):
+
+- `C:\Users\jonathan\Documents\HiWi\openaerialmap_scraper_clean` - scraper, pipeline, phenology base. Untouched; its vision files are intentionally excluded here.
+- `C:\Users\jonathan\Documents\HiWi\aerial-phenology-audit` - source of `aerial_phenology_audit.py` (copied verbatim, unmodified).
+
+All changes live in this repo.
