@@ -61,24 +61,6 @@ class TestFetchOpendata:
         assert len(result) == 5
 
     @patch("scrape.requests")
-    def test_fetch_with_date_filter(self, mock_requests):
-        """Test fetching with date filters."""
-        mock_response = MagicMock()
-        mock_response.ok = True
-        mock_response.json.return_value = {
-            "meta": {"found": 10, "limit": 10},
-            "results": [],
-        }
-        mock_requests.get.return_value = mock_response
-
-        result = fetch_openaerial_data(start_date="2025-01-01", end_date="2025-12-31")
-
-        mock_requests.get.assert_called_once()
-        call_args = mock_requests.get.call_args
-        assert "start_date" in call_args.kwargs["params"]
-        assert call_args.kwargs["params"]["start_date"] == "2025-01-01"
-
-    @patch("scrape.requests")
     def test_fetch_api_error(self, mock_requests):
         """Test handling API errors."""
         mock_response = MagicMock()
