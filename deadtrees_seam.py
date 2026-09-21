@@ -47,7 +47,7 @@ def upload_and_process(
     file_path: Path,
     authors: List[str],
     platform: str,
-    license_str: str,
+    license: str,
     data_access: str,
     acquisition_year: int,
     acquisition_month: int,
@@ -62,7 +62,7 @@ def upload_and_process(
         file_path=str(file_path),
         authors=authors,
         platform=platform,
-        license=license_str,
+        license=license,
         data_access=data_access,
         aquisition_year=acquisition_year,  # upstream's spelling of the kwarg
         aquisition_month=acquisition_month,

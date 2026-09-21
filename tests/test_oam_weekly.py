@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 import oam_weekly
+import deadtrees_seam
 
 
 def _write_csv(path: Path, header, rows):
@@ -212,6 +213,29 @@ class TestAppendLedgerRow:
         assert rows[1][1] == "CC BY"
         assert rows[2][0] == "b.tif"
         assert len(rows) == 3
+
+
+class TestSeamSignature:
+    def test_upload_kwargs_match_seam_signature(self):
+        """The wrapper spreads build_upload_kwargs into the seam; keys must match its parameters."""
+        import inspect
+
+        kwargs = oam_weekly.build_upload_kwargs(
+            pd.Series(
+                {
+                    "filename": "abc.tif",
+                    "acquisition_date": "2026-09-11",
+                    "platform": "drone",
+                    "licence": "CC BY",
+                    "authors": "A",
+                    "additional_information": SAMPLE_ADDITIONAL,
+                    "property_license": "CC-BY 4.0",
+                }
+            ),
+            date(2026, 9, 21),
+        )
+        params = set(inspect.signature(deadtrees_seam.upload_and_process).parameters)
+        assert {"file_path", *kwargs.keys()} == params
 
 
 class TestWriteStatus:
