@@ -1,44 +1,13 @@
-# OpenAerialMap Scraper Clean Bundle
+# oam-automation
 
-This is the supported, resumable OpenAerialMap pipeline. The historical
-scraper remains unchanged in `openaerialmap_scraper`.
+Patched copy of `openaerialmap_scraper_clean` for automated OAM fetching, phenology classification, and upload to deadtrees.earth.
 
-`pipeline.py` runs scraping, standardized metadata filtering, deterministic
-MODIS phenology, thumbnail download, TIFF download, JPEG conversion, and
-metadata creation. Phenology uses 30 days of padding by default. No LLM
-filtering is used.
+## Patches applied (WP-01)
 
-Use `--download-mode selected` for reviewed thumbnails or
-`--download-mode all` for every row surviving the metadata stages.
+1. **v3 MODIS zarr**: Replaces buggy v2 (any-NaN interpolation) with corrected v3 (all-NaN interpolation).
+2. **DOY off-by-one fix**: `parse_date_to_doy` returns `tm_yday - 1` (0-indexed) to match MODIS DOY convention (0-365).
+3. **Phenology path fix**: Pipeline no longer overrides the default path, preventing path divergence.
 
-```text
-run/raw/openaerial_data.csv
-run/metadata/{filtered,phenology,tif_metadata,jpeg_metadata}.csv
-run/thumbnails/
-run/tifs/
-run/jpegs/
-run/logs/
-run/run_manifest.json
-```
+## Original repo
 
-Install dependencies and authenticate Earth Engine:
-
-```bash
-pip install -r requirements.txt
-python -c "import ee; ee.Authenticate()"
-```
-
-Dry run:
-
-```bash
-python pipeline.py --dry-run --output-dir D:/oam_runs/test
-```
-
-Full unattended run:
-
-```bash
-python pipeline.py --download-mode all --pad-days 30 --output-dir D:/oam_runs/run_001
-```
-
-The bundled MODIS data is under `phenology/`. Existing stage outputs are
-reused. Downloads and JPEG conversion do not overwrite existing files.
+`C:\Users\jonathan\Documents\HiWi\openaerialmap_scraper_clean` is untouched. All changes live here.

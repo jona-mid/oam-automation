@@ -75,32 +75,32 @@ class TestClassifySeason:
 
 
 class TestParseDateToDoy:
-    """Tests for parse_date_to_doy function."""
+    """Tests for parse_date_to_doy function. DOY is 0-indexed (0-365) to match MODIS."""
 
     def test_parse_iso_datetime(self):
         """Test parsing ISO datetime string."""
         result = parse_date_to_doy("2025-01-15T10:30:00")
-        assert result == 15
+        assert result == 14
 
     def test_parse_iso_datetime_with_microseconds(self):
         """Test parsing ISO datetime with microseconds."""
         result = parse_date_to_doy("2025-01-15T10:30:00.123456")
-        assert result == 15
+        assert result == 14
 
     def test_parse_iso_date(self):
         """Test parsing simple ISO date."""
         result = parse_date_to_doy("2025-01-15")
-        assert result == 15
+        assert result == 14
 
     def test_parse_date_with_z_suffix(self):
         """Test parsing date with Z suffix."""
         result = parse_date_to_doy("2025-01-15T10:30:00Z")
-        assert result == 15
+        assert result == 14
 
     def test_parse_date_with_timezone(self):
         """Test parsing date with timezone offset."""
         result = parse_date_to_doy("2025-01-15T10:30:00+00:00")
-        assert result == 15
+        assert result == 14
 
     def test_parse_none(self):
         """Test parsing None returns None."""
@@ -117,10 +117,25 @@ class TestParseDateToDoy:
         result = parse_date_to_doy("invalid-date")
         assert result is None
 
-    def test_december_date(self):
-        """Test parsing December date."""
+    def test_jan_1_is_doy_zero(self):
+        """Jan 1 maps to DOY 0 (0-indexed)."""
+        result = parse_date_to_doy("2025-01-01")
+        assert result == 0
+
+    def test_dec_31_non_leap_year(self):
+        """Dec 31 in non-leap year is DOY 364."""
         result = parse_date_to_doy("2025-12-31")
+        assert result == 364
+
+    def test_dec_31_leap_year(self):
+        """Dec 31 in leap year is DOY 365."""
+        result = parse_date_to_doy("2024-12-31")
         assert result == 365
+
+    def test_year_boundary(self):
+        """Jan 1 of next year is DOY 0."""
+        result = parse_date_to_doy("2026-01-01")
+        assert result == 0
 
 
 class TestTransformBboxToModis:

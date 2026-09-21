@@ -45,8 +45,7 @@ _REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_PHENOLOGY_PATH = str(
     _REPO_ROOT
     / "phenology"
-    / "modis_pheno_processed_v2.zarr"
-    / "modis_pheno_processed_v2.zarr"
+    / "modis_pheno_processed_v3.zarr"
 )
 DEFAULT_METADATA_CSV = str(_REPO_ROOT / "tif_metadata.csv")
 DEFAULT_TIF_DIR = str(_REPO_ROOT / "tifs")
@@ -179,7 +178,7 @@ def extract_bbox_from_tif(tif_path: str) -> Tuple[float, float, float, float]:
 
 
 def parse_date_to_doy(date_str: Optional[str]) -> Optional[int]:
-    """Parse date string to Day of Year. Supports multiple formats including ISO 8601 with timezone."""
+    """Parse date string to 0-indexed Day of Year (0-365) to match MODIS. Supports ISO 8601 with timezone."""
     if not date_str:
         return None
     date_str = str(date_str).strip()
@@ -201,7 +200,7 @@ def parse_date_to_doy(date_str: Optional[str]) -> Optional[int]:
     for fmt in formats:
         try:
             dt = datetime.strptime(date_str, fmt)
-            return dt.timetuple().tm_yday
+            return dt.timetuple().tm_yday - 1
         except ValueError:
             continue
 

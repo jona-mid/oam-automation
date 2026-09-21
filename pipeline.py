@@ -86,7 +86,7 @@ def main():
     manifest["stages"]["filter"] = {"output": str(filtered_csv)}
 
     if not pheno_csv.exists():
-        run("phenology.py", "--mode", "csv", "--csv", filtered_csv, "--output", pheno_csv, "--pad-days", args.pad_days, "--phenology", ROOT / "phenology" / "modis_pheno_processed_v2.zarr", cwd=output)
+        run("phenology.py", "--mode", "csv", "--csv", filtered_csv, "--output", pheno_csv, "--pad-days", args.pad_days, cwd=output)
     manifest["stages"]["phenology"] = {"output": str(pheno_csv), "pad_days": args.pad_days}
 
     if not any(thumbnails.iterdir()):
