@@ -4,18 +4,24 @@
 Steps: pipeline subprocess -> VLM gate (in_season AND leaf_on AND review success)
 -> two-legged diff (ledger CSV + server-side file_name check) -> upload each
 candidate -> append canonical rows to the ledger -> status file.
+
+Machine-specific configuration (ledger path, credentials) lives in the
+gitignored `.env`; see OAM_UPLOADED_CSV below.
 """
 
 import argparse
 import csv
+import os
 import re
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import List, Optional, Set, Tuple
+from typing import List, NamedTuple, Optional, Set, Tuple
 
 import pandas as pd
+from dotenv import load_dotenv
 
 import deadtrees_seam
 
@@ -34,14 +40,35 @@ LEDGER_COLUMNS = [
     "citation_doi",
 ]
 VALID_PLATFORMS = {"drone", "airborne"}
-# OAM property_license strings -> deadtrees LicenseEnum values. Unknown values fail closed.
-OAM_LICENSE_MAP = {
-    "CC-BY 4.0": "CC BY",
-    "CC BY-SA 4.0": "CC BY-SA",
-    "CC BY-NC 4.0": "CC BY-NC",
-    "CC BY-NC-SA 4.0": "CC BY-NC-SA",
-    "MIT": "MIT",
-}
+
+
+@dataclass
+class RunCounts:
+    candidates: int = 0
+    uploaded: int = 0
+    failed: int = 0
+
+
+class UploadSpec(NamedTuple):
+    filename: str
+    tif_path: Path
+    kwargs: dict
+
+
+@dataclass
+class Preparation:
+    candidates: int = 0
+    specs: List[UploadSpec] = field(default_factory=list)
+    rejected: int = 0
+
+
+def normalize_filename(value) -> str:
+    return str(value).strip().lower()
+
+
+def format_en_date(value: date) -> str:
+    """'September 21, 2026' without platform-specific strftime padding flags."""
+    return f"{value:%B} {value.day}, {value:%Y}"
 
 
 def run_pipeline(repo_root: Path, run_dir: Path) -> None:
@@ -56,19 +83,10 @@ def load_gate_candidates(run_dir: Path) -> pd.DataFrame:
     jpeg_meta = pd.read_csv(run_dir / "metadata" / "jpeg_metadata.csv")
     # Both sides carry a `platform` column; keep the jpeg-metadata names clean.
     joined = report.merge(jpeg_meta, on="filename", how="inner", suffixes=("_report", ""))
-    # The real license provenance lives only in the tif metadata (OAM property_license).
-    # The upstream tif mode appends existing rows on rebuild, so deduplicate defensively.
-    tif_licenses = (
-        pd.read_csv(run_dir / "metadata" / "tif_metadata.csv", dtype=str)[
-            ["filename", "property_license"]
-        ]
-        .drop_duplicates(subset="filename")
-    )
-    licensed = joined.merge(tif_licenses, on="filename", how="inner")
-    return licensed[
-        (licensed["modis_category"] == "in_season")
-        & (licensed["tree_canopy_leaf_state"] == "leaf_on")
-        & (licensed["review_status"] == "success")
+    return joined[
+        (joined["modis_category"] == "in_season")
+        & (joined["tree_canopy_leaf_state"] == "leaf_on")
+        & (joined["review_status"] == "success")
     ]
 
 
@@ -77,12 +95,7 @@ def load_ledger_filenames(csv_path: Path) -> Set[str]:
     if not csv_path.exists():
         return set()
     df = pd.read_csv(csv_path, dtype=str)
-    return {str(name).strip().lower() for name in df["filename"].dropna()}
-
-
-def format_en_date(value: date) -> str:
-    """'September 21, 2026' without platform-specific strftime padding flags."""
-    return f"{value:%B} {value.day}, {value:%Y}"
+    return {normalize_filename(name) for name in df["filename"].dropna()}
 
 
 def build_upload_kwargs(row: pd.Series, run_date: date) -> dict:
@@ -102,23 +115,22 @@ def build_upload_kwargs(row: pd.Series, run_date: date) -> dict:
     if pd.isna(raw_license) or not str(raw_license).strip():
         raise ValueError("missing property_license")
     raw_license = str(raw_license).strip()
-    if raw_license not in OAM_LICENSE_MAP:
+    if raw_license not in deadtrees_seam.OAM_LICENSE_MAP:
         raise ValueError(f"unknown OAM license value: {raw_license!r}")
 
-    additional = row["additional_information"]
-    id_match = re.search(r"meta\?_id=([A-Za-z0-9]+)", "" if pd.isna(additional) else str(additional))
-    if not id_match:
-        raise ValueError("missing OAM _id in additional_information")
+    oam_id = row["oam_id"]
+    if pd.isna(oam_id) or not str(oam_id).strip():
+        raise ValueError("missing oam_id")
     additional = (
         "This orthophoto data is available through OpenAerialMap, provided by Contributors "
         f"of Open Imagery Network. Licensed under {raw_license}. More information about this "
-        f"dataset: https://api.openaerialmap.org/meta?_id={id_match.group(1)} "
+        f"dataset: https://api.openaerialmap.org/meta?_id={str(oam_id).strip()} "
         f"Accessed {format_en_date(run_date)}."
     )
     return {
         "authors": [str(authors)],
         "platform": platform,
-        "license": OAM_LICENSE_MAP[raw_license],
+        "license": deadtrees_seam.OAM_LICENSE_MAP[raw_license],
         "data_access": "public",
         "acquisition_year": acquisition.year,
         "acquisition_month": acquisition.month,
@@ -152,15 +164,15 @@ def append_ledger_row(csv_path: Path, filename: str, kwargs: dict) -> None:
         )
 
 
-def write_status(path: Path, run_dir: Path, dry_run: bool, counts: dict, exit_status: str) -> None:
+def write_status(path: Path, run_dir: Path, dry_run: bool, counts: RunCounts, exit_status: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
         f"run_dir: {run_dir}",
         f"dry_run: {dry_run}",
-        f"candidates: {counts['candidates']}",
-        f"uploaded: {counts['uploaded']}",
-        f"failed: {counts['failed']}",
+        f"candidates: {counts.candidates}",
+        f"uploaded: {counts.uploaded}",
+        f"failed: {counts.failed}",
         f"exit: {exit_status}",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -177,8 +189,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--uploaded-csv",
         type=Path,
-        default=Path(r"H:\projects\deadtrees\data_openaerialmap\metadata_uploaded.csv"),
-        help="Canonical upload ledger (diff leg 1 and append target)",
+        default=None,
+        help="Canonical upload ledger (diff leg 1 and append target); defaults to $OAM_UPLOADED_CSV",
     )
     parser.add_argument(
         "--status-file",
@@ -196,87 +208,118 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Skip the server-side duplicate check (diff leg 2)",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.uploaded_csv is None:
+        env_value = os.environ.get("OAM_UPLOADED_CSV", "").strip()
+        if env_value:
+            args.uploaded_csv = Path(env_value)
+    if args.uploaded_csv is None:
+        parser.error("--uploaded-csv or OAM_UPLOADED_CSV is required")
+    return args
+
+
+def prepare_candidates(
+    gate: pd.DataFrame,
+    ledger: Set[str],
+    run_dir: Path,
+    server_check: bool,
+) -> Preparation:
+    """Diff gate rows against the ledger and the platform, then build upload specs."""
+    candidates = [
+        row for _, row in gate.iterrows() if normalize_filename(row["filename"]) not in ledger
+    ]
+
+    if server_check and candidates:
+        kept = []
+        try:
+            for row in candidates:
+                filename = normalize_filename(row["filename"])
+                if deadtrees_seam.file_exists_on_platform(filename):
+                    print(f"  = {filename} already on the platform, skipping")
+                else:
+                    kept.append(row)
+            candidates = kept
+        except Exception as error:
+            checked = len(kept)
+            print(
+                f"  ! Server-side check unavailable ({error}); "
+                f"skipping the check for the remaining {len(candidates) - checked} candidates"
+            )
+            candidates = kept + candidates[checked:]
+
+    specs: List[UploadSpec] = []
+    rejected = 0
+    for row in candidates:
+        filename = normalize_filename(row["filename"])
+        tif_path = run_dir / "tifs" / filename
+        if not tif_path.exists():
+            print(f"  ! {filename}: TIFF missing at {tif_path}, skipping")
+            rejected += 1
+            continue
+        try:
+            kwargs = build_upload_kwargs(row, date.today())
+        except Exception as error:
+            print(f"  ! {filename}: candidate rejected ({error}), skipping")
+            rejected += 1
+            continue
+        specs.append(UploadSpec(filename=filename, tif_path=tif_path, kwargs=kwargs))
+    return Preparation(candidates=len(candidates), specs=specs, rejected=rejected)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    load_dotenv(ROOT / ".env")
     args = parse_args(argv)
     run_dir = (args.output_dir or ROOT / "runs" / datetime.now().strftime("%Y-%m-%d")).resolve()
     status_file = (args.status_file or run_dir.parent / "last_run.txt").resolve()
 
-    counts = {"candidates": 0, "uploaded": 0, "failed": 0}
+    counts = RunCounts()
+    exit_status = "failed"
     try:
         if args.dry_run and not (run_dir / "metadata" / "phenology_report.csv").exists():
-            print(f"Dry run needs an existing run dir with pipeline outputs; none at {run_dir}")
-            return 1
+            raise RuntimeError(
+                f"Dry run needs an existing run dir with pipeline outputs; none at {run_dir}"
+            )
 
         if not args.dry_run:
             run_pipeline(ROOT, run_dir)
 
         gate = load_gate_candidates(run_dir)
         ledger = load_ledger_filenames(args.uploaded_csv)
-        candidates = [
-            row for _, row in gate.iterrows() if str(row["filename"]).strip().lower() not in ledger
-        ]
-        counts["candidates"] = len(candidates)
-        print(f"Gate passed {len(gate)} images; {counts['candidates']} not in the ledger.")
-
-        server_check_enabled = not args.skip_server_check
-        upload_specs: List[Tuple[str, Path, dict]] = []
-        for row in candidates:
-            filename = str(row["filename"])
-            if server_check_enabled:
-                try:
-                    if deadtrees_seam.file_exists_on_platform(filename):
-                        print(f"  = {filename} already on the platform, skipping")
-                        continue
-                except Exception as error:
-                    print(f"  ! Server-side check unavailable ({error}); continuing without it")
-                    server_check_enabled = False
-            tif_path = run_dir / "tifs" / filename
-            if not tif_path.exists():
-                print(f"  ! {filename}: TIFF missing at {tif_path}, skipping")
-                counts["failed"] += 1
-                continue
-            try:
-                kwargs = build_upload_kwargs(row, date.today())
-            except Exception as error:
-                print(f"  ! {filename}: candidate rejected ({error}), skipping")
-                counts["failed"] += 1
-                continue
-            upload_specs.append((filename, tif_path, kwargs))
+        prep = prepare_candidates(gate, ledger, run_dir, server_check=not args.skip_server_check)
+        counts.candidates = prep.candidates
+        counts.failed = prep.rejected
+        print(f"Gate passed {len(gate)} images; {prep.candidates} not in the ledger.")
 
         if args.dry_run:
-            print(f"Dry run: {len(upload_specs)} would-be uploads, zero upload calls.")
-            for filename, tif_path, kwargs in upload_specs:
-                print(f"  * {filename} <- {tif_path}")
-                for key, value in kwargs.items():
+            print(f"Dry run: {len(prep.specs)} would-be uploads, zero upload calls.")
+            for spec in prep.specs:
+                print(f"  * {spec.filename} <- {spec.tif_path}")
+                for key, value in spec.kwargs.items():
                     print(f"      {key}: {value}")
-            write_status(status_file, run_dir, True, counts, "dry-run")
-            return 0
-
-        for filename, tif_path, kwargs in upload_specs:
-            try:
-                dataset_id = deadtrees_seam.upload_and_process(tif_path, **kwargs)
-            except Exception as error:
-                print(f"  x {filename}: upload failed: {error}")
-                counts["failed"] += 1
-                continue
-            append_ledger_row(args.uploaded_csv, filename, kwargs)
-            counts["uploaded"] += 1
-            print(f"  + {filename} uploaded (dataset {dataset_id}), ledger row appended")
-
-        print(
-            f"Summary: {counts['candidates']} candidates, "
-            f"{counts['uploaded']} uploaded, {counts['failed']} failed."
-        )
-        exit_status = "success" if counts["failed"] == 0 else "failed"
-        write_status(status_file, run_dir, False, counts, exit_status)
-        return 0 if counts["failed"] == 0 else 1
+            exit_status = "dry-run"
+        else:
+            for spec in prep.specs:
+                try:
+                    dataset_id = deadtrees_seam.upload_and_process(spec.tif_path, **spec.kwargs)
+                except Exception as error:
+                    print(f"  x {spec.filename}: upload failed: {error}")
+                    counts.failed += 1
+                    continue
+                append_ledger_row(args.uploaded_csv, spec.filename, spec.kwargs)
+                counts.uploaded += 1
+                print(f"  + {spec.filename} uploaded (dataset {dataset_id}), ledger row appended")
+            print(
+                f"Summary: {counts.candidates} candidates, "
+                f"{counts.uploaded} uploaded, {counts.failed} failed."
+            )
+            exit_status = "success" if counts.failed == 0 else "failed"
     except Exception as error:
         print(f"Run aborted: {error}")
-        write_status(status_file, run_dir, args.dry_run, counts, "failed")
-        return 1
+        exit_status = "failed"
+    finally:
+        write_status(status_file, run_dir, args.dry_run, counts, exit_status)
+
+    return 0 if exit_status in ("success", "dry-run") else 1
 
 
 if __name__ == "__main__":

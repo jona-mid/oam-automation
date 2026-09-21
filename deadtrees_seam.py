@@ -15,6 +15,15 @@ ENV_PATH = Path(__file__).resolve().parent / ".env"
 TASK_TYPES = ["geotiff", "metadata", "cog", "thumbnail", "deadwood_v1", "treecover_v1"]
 PROCESS_PRIORITY = 2
 
+# OAM property_license strings -> deadtrees LicenseEnum values. Unknown values fail closed.
+OAM_LICENSE_MAP = {
+    "CC-BY 4.0": "CC BY",
+    "CC BY-SA 4.0": "CC BY-SA",
+    "CC BY-NC 4.0": "CC BY-NC",
+    "CC BY-NC-SA 4.0": "CC BY-NC-SA",
+    "MIT": "MIT",
+}
+
 
 def _platform_api() -> Tuple[Any, Any, Any]:
     """Load .env, then import the platform modules (Settings requires the env vars)."""

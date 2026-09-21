@@ -26,7 +26,18 @@ scrape -> filter -> phenology -> thumbnails -> tifs -> jpegs -> metadata
 - Only `in_season` images are reviewed (`--priorities in_season`); out-of-season images never reach upload.
 - `phenology.py` derives `filename`, `classification`, and `jpeg_filename` columns so the manifest reads `phenology.csv` directly (no adapter).
 - `phenology-run` is resumable: re-runs skip images with recorded successes ($0 re-run cost).
-- Upload gate (WP-02, not yet built): MODIS `in_season` AND VLM `leaf_on` AND `review_status == success`.
+- Upload gate: MODIS `in_season` AND VLM `leaf_on` AND `review_status == success`.
+
+## Weekly wrapper (WP-02)
+
+`oam_weekly.py` runs the pipeline, applies the upload gate, diffs against the ledger and the platform, uploads via the monorepo `deadtrees-cli` (`deadtrees_seam.py` is the thin platform seam), appends successes to the ledger CSV, and writes a status file. Machine-specific configuration lives in the gitignored `.env`:
+
+- `OPENROUTER_API_KEY` - injected into the pipeline subprocess env
+- `PROCESSOR_USERNAME` / `PROCESSOR_PASSWORD` - deadtrees.earth account
+- `SUPABASE_URL` / `SUPABASE_KEY` / `API_ENDPOINT` - platform endpoints
+- `OAM_UPLOADED_CSV` - canonical upload ledger path (default for `--uploaded-csv`; required unless the flag is given)
+
+`--dry-run` lists candidates and upload kwargs without uploading; `--skip-server-check` skips the platform-side duplicate check.
 
 ## Upstream sources
 
