@@ -1,0 +1,11 @@
+pandas
+requests
+earthengine-api
+tqdm
+numpy
+rasterio
+xarray
+zarr
+rich
+Pillow
+
