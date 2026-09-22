@@ -9,6 +9,7 @@ stack installed.
 
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
+import os
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"
 
@@ -50,6 +51,34 @@ def file_exists_on_platform(filename: str) -> bool:
             .execute()
         )
         return len(response.data) > 0
+
+
+def file_hash(path: Path) -> str:
+    """Content identifier matching the backend's algorithm in shared/hash.py."""
+    from shared.hash import get_file_identifier
+
+    return get_file_identifier(path)
+
+
+def file_hashes_on_platform(hashes: List[str]) -> Any:
+    """Batched content-hash check against the platform's orthos table.
+
+    The backend processor computes get_file_identifier (shared/hash.py) for
+    every processed upload and stores it in orthos.sha256. A match means the
+    same file content is already on the platform. Returns {hash: dataset_id}.
+    Readable with the anon SUPABASE_KEY, so no login needed.
+    """
+    if not hashes:
+        return {}
+    _, use_client, settings = _platform_api()
+    with use_client(os.environ["SUPABASE_KEY"]) as client:
+        response = (
+            client.table(settings.orthos_table)
+            .select("dataset_id,sha256")
+            .in_("sha256", hashes)
+            .execute()
+        )
+    return {row["sha256"]: row["dataset_id"] for row in response.data if row.get("sha256")}
 
 
 def upload_and_process(
