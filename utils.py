@@ -5,7 +5,6 @@ Shared utilities for metadata processing scripts.
 
 from __future__ import annotations
 
-import argparse
 import csv
 import datetime as dt
 import glob
@@ -23,9 +22,6 @@ import pandas as pd
 import rasterio
 import requests
 from tqdm import tqdm
-
-
-Truthy = {"true", "1", "yes", "y", "t"}
 
 
 def configure_logging(log_file: str = "metadata_creation.log") -> logging.Logger:
@@ -74,32 +70,6 @@ def write_csv(
         writer.writerows(rows)
 
 
-def read_csv_pandas(path: str, encoding: str = "utf-8-sig") -> "pd.DataFrame":
-    """Read CSV file using pandas."""
-    return pd.read_csv(path, encoding=encoding)
-
-
-def write_csv_pandas(df: "pd.DataFrame", path: str, index: bool = False) -> None:
-    """Write DataFrame to CSV file."""
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, index=index, encoding="utf-8-sig")
-
-
-def norm_filename(v: Any) -> str:
-    """Normalize filename for comparison."""
-    return str(v).strip().lower()
-
-
-def parse_bool(v: Any) -> bool:
-    """Parse boolean value from various formats."""
-    if isinstance(v, bool):
-        return v
-    s = str(v).strip().lower()
-    if not s:
-        return False
-    return s in Truthy
-
-
 def parse_bbox_string(bbox_str: str) -> Optional[Any]:
     """Parse bbox string '[min_lon, min_lat, max_lon, max_lat]' or '[min_lon min_lat max_lon max_lat]' -> list of floats."""
     if bbox_str is None:
@@ -127,94 +97,6 @@ def parse_iso_date(v: Any) -> Optional[dt.date]:
         return dt.date.fromisoformat(s10)
     except ValueError:
         return None
-
-
-def date_to_doy(date: dt.date) -> int:
-    """Convert date to day-of-year."""
-    return date.timetuple().tm_yday
-
-
-def normalize_doy(doy: int, year_len: int = 366) -> int:
-    """Normalize day-of-year to range [1, year_len]."""
-    if year_len <= 0:
-        raise ValueError("year_len must be positive")
-    return ((int(doy) - 1) % year_len) + 1
-
-
-def in_interval_wrap(
-    capture_doy: int, start_doy: int, end_doy: int, *, year_len: int = 366
-) -> bool:
-    """Check if capture_doy falls within [start_doy, end_doy] with wrap-around."""
-    c = normalize_doy(capture_doy, year_len=year_len)
-    start = normalize_doy(start_doy, year_len=year_len)
-    end = normalize_doy(end_doy, year_len=year_len)
-    if start <= end:
-        return start <= c <= end
-    return c >= start or c <= end
-
-
-def in_leaf_on(
-    capture_doy: int, pheno_start: Optional[float], pheno_end: Optional[float]
-) -> bool:
-    """Check if capture_doy is within phenology window (handles wrap-around)."""
-    if pheno_start is None or pheno_end is None:
-        return False
-    start = int(round(pheno_start))
-    end = int(round(pheno_end))
-    if start <= end:
-        return start <= capture_doy <= end
-    return capture_doy >= start or capture_doy <= end
-
-
-def in_leaf_on_padded(
-    capture_doy: int,
-    pheno_start: Optional[float],
-    pheno_end: Optional[float],
-    *,
-    pad_days: int = 0,
-) -> bool:
-    """Like in_leaf_on but expands window by pad_days on both sides."""
-    if pheno_start is None or pheno_end is None:
-        return False
-    """Like in_leaf_on but expands window by pad_days on both sides."""
-    start = int(round(pheno_start)) - int(pad_days)
-    end = int(round(pheno_end)) + int(pad_days)
-    return in_interval_wrap(capture_doy, start, end)
-
-
-def load_phenology_map(
-    phenology_csv: str,
-) -> Dict[str, Tuple[Optional[float], Optional[float]]]:
-    """Load phenology data: filename -> (pheno_start_doy, pheno_end_doy)."""
-    pheno: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
-    with open(phenology_csv, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        if not reader.fieldnames or "filename" not in reader.fieldnames:
-            raise ValueError(f"Expected 'filename' column in {phenology_csv}")
-        if (
-            "pheno_start_doy" not in reader.fieldnames
-            or "pheno_end_doy" not in reader.fieldnames
-        ):
-            raise ValueError(f"Expected 'pheno_start_doy' and 'pheno_end_doy' columns")
-
-        for row in reader:
-            fname = norm_filename(row.get("filename", ""))
-            if not fname:
-                continue
-
-            start_raw = (row.get("pheno_start_doy") or "").strip()
-            end_raw = (row.get("pheno_end_doy") or "").strip()
-            try:
-                start = float(start_raw) if start_raw else None
-            except ValueError:
-                start = None
-            try:
-                end = float(end_raw) if end_raw else None
-            except ValueError:
-                end = None
-
-            pheno[fname] = (start, end)
-    return pheno
 
 
 def remap_platform(platform_value: Any) -> str:
@@ -319,31 +201,6 @@ def load_uploaded_filenames(folder: str) -> Set[str]:
         except Exception:
             continue
     return uploaded_files
-
-
-def match_tif_to_csv(
-    tif_name: str, csv_rows: List[Dict[str, str]]
-) -> Optional[Dict[str, str]]:
-    """Match TIF filename to CSV row. Returns first match or None."""
-    potential_tif = os.path.splitext(tif_name)[0]
-
-    for row in csv_rows:
-        csv_filename = row.get("filename", "")
-        if csv_filename == potential_tif:
-            return row
-
-        csv_base = os.path.splitext(csv_filename)[0]
-        if csv_base == os.path.splitext(potential_tif)[0]:
-            return row
-
-    return None
-
-
-def parse_args(description: str) -> "argparse.ArgumentParser":
-    """Create argument parser with common options."""
-    import argparse
-
-    return argparse.ArgumentParser(description=description)
 
 
 def configure_download_logging(log_file: str = "download.log") -> logging.Logger:

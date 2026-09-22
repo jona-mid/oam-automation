@@ -27,8 +27,6 @@ def count_files(path, suffixes):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=Path("run"))
-    parser.add_argument("--download-mode", choices=("selected", "all"), default="selected")
-    parser.add_argument("--selection-dir", type=Path, default=None)
     parser.add_argument("--uploaded-after-date", default=None)
     parser.add_argument("--uploaded-before-date", default=None)
     parser.add_argument("--forest-min", type=float, default=None)
@@ -41,7 +39,6 @@ def main():
     parser.add_argument("--vlm-endpoint", default="https://openrouter.ai/api/v1/chat/completions")
     parser.add_argument("--vlm-model", default="google/gemini-3-flash-preview")
     parser.add_argument("--vlm-workers", type=int, default=4)
-    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     output = args.output_dir.resolve()
@@ -61,11 +58,6 @@ def main():
         "stages": {},
     }
     manifest_path = output / "run_manifest.json"
-    if args.dry_run:
-        manifest["dry_run"] = True
-        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        print(f"Dry run. Output layout prepared at {output}")
-        return 0
 
     raw_csv = raw / "openaerial_data.csv"
     filtered_csv = metadata / "filtered.csv"
@@ -90,22 +82,15 @@ def main():
     manifest["stages"]["filter"] = {"output": str(filtered_csv)}
 
     if not pheno_csv.exists():
-        run("phenology.py", "--mode", "csv", "--csv", filtered_csv, "--output", pheno_csv, "--pad-days", args.pad_days, cwd=output)
+        run("phenology.py", "--csv", filtered_csv, "--output", pheno_csv, "--pad-days", args.pad_days, cwd=output)
     manifest["stages"]["phenology"] = {"output": str(pheno_csv), "pad_days": args.pad_days}
 
     if not any(thumbnails.iterdir()):
         run("download.py", "thumbnails", "--csv", pheno_csv, "--folder", thumbnails, "--workers", args.thumbnail_workers, cwd=output)
     manifest["stages"]["thumbnails"] = {"files": count_files(thumbnails, {".png", ".jpg", ".jpeg"}), "output": str(thumbnails)}
 
-    tif_args = ["tifs", "--csv", pheno_csv, "--output-dir", tifs, "--workers", args.tif_workers]
-    if args.download_mode == "all":
-        tif_args.append("--all")
-    else:
-        tif_args += ["--thumbnails-dir", args.selection_dir or thumbnails]
-    if args.download_mode == "selected" and not (args.selection_dir or thumbnails).exists():
-        raise SystemExit("Selected mode requires --selection-dir or the default thumbnails directory")
     if not any(tifs.iterdir()):
-        run("download.py", *tif_args, cwd=output)
+        run("download.py", "tifs", "--csv", pheno_csv, "--thumbnails-dir", thumbnails, "--output-dir", tifs, "--workers", args.tif_workers, cwd=output)
     manifest["stages"]["tifs"] = {"files": count_files(tifs, {".tif", ".tiff"}), "output": str(tifs)}
 
     if not any(jpegs.iterdir()):

@@ -14,14 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import (
     parse_bbox_string,
-    parse_bool,
     parse_iso_date,
-    date_to_doy,
-    normalize_doy,
-    in_interval_wrap,
-    in_leaf_on,
-    in_leaf_on_padded,
-    norm_filename,
     remap_platform,
     extract_author,
     is_long_campaign,
@@ -65,29 +58,6 @@ class TestParseBboxString:
         assert result is None
 
 
-class TestParseBool:
-    """Tests for parse_bool function."""
-
-    def test_parse_true_values(self):
-        assert parse_bool(True) is True
-        assert parse_bool("true") is True
-        assert parse_bool("1") is True
-        assert parse_bool("yes") is True
-        assert parse_bool("y") is True
-        assert parse_bool("t") is True
-
-    def test_parse_false_values(self):
-        assert parse_bool(False) is False
-        assert parse_bool("false") is False
-        assert parse_bool("0") is False
-        assert parse_bool("no") is False
-        assert parse_bool("n") is False
-        assert parse_bool("f") is False
-
-    def test_parse_empty_string(self):
-        assert parse_bool("") is False
-
-
 class TestParseIsoDate:
     """Tests for parse_iso_date function."""
 
@@ -106,111 +76,6 @@ class TestParseIsoDate:
     def test_parse_empty_string(self):
         result = parse_iso_date("")
         assert result is None
-
-
-class TestDateToDoy:
-    """Tests for date_to_doy function."""
-
-    def test_jan_1(self):
-        result = date_to_doy(dt.date(2025, 1, 1))
-        assert result == 1
-
-    def test_dec_31(self):
-        result = date_to_doy(dt.date(2025, 12, 31))
-        assert result == 365
-
-    def test_mid_year(self):
-        result = date_to_doy(dt.date(2025, 6, 15))
-        assert result == 166
-
-
-class TestNormalizeDoy:
-    """Tests for normalize_doy function."""
-
-    def test_normalize_mid_range(self):
-        assert normalize_doy(100, 366) == 100
-
-    def test_normalize_wrap_above_year(self):
-        assert normalize_doy(400, 366) == 34
-
-    def test_normalize_wrap_below_one(self):
-        assert normalize_doy(-5, 366) == 361
-
-    def test_normalize_leap_year(self):
-        assert normalize_doy(60, 367) == 60
-
-
-class TestInIntervalWrap:
-    """Tests for in_interval_wrap function."""
-
-    def test_inside_normal_interval(self):
-        assert in_interval_wrap(150, 100, 200) is True
-
-    def test_outside_normal_interval(self):
-        assert in_interval_wrap(50, 100, 200) is False
-
-    def test_at_start(self):
-        assert in_interval_wrap(100, 100, 200) is True
-
-    def test_at_end(self):
-        assert in_interval_wrap(200, 100, 200) is True
-
-    def test_inside_wrap_interval(self):
-        assert in_interval_wrap(350, 300, 50) is True
-
-    def test_outside_wrap_interval(self):
-        assert in_interval_wrap(100, 300, 50) is False
-
-
-class TestInLeafOn:
-    """Tests for in_leaf_on function."""
-
-    def test_inside_window(self):
-        assert in_leaf_on(150, 100, 200) is True
-
-    def test_outside_window(self):
-        assert in_leaf_on(50, 100, 200) is False
-
-    def test_at_start(self):
-        assert in_leaf_on(100, 100, 200) is True
-
-    def test_at_end(self):
-        assert in_leaf_on(200, 100, 200) is True
-
-    def test_wrap_around_inside(self):
-        assert in_leaf_on(350, 300, 50) is True
-
-    def test_wrap_around_outside(self):
-        assert in_leaf_on(100, 300, 50) is False
-
-    def test_none_start(self):
-        assert in_leaf_on(150, None, 200) is False
-
-    def test_none_end(self):
-        assert in_leaf_on(150, 100, None) is False
-
-
-class TestInLeafOnPadded:
-    """Tests for in_leaf_on_padded function."""
-
-    def test_no_padding(self):
-        assert in_leaf_on_padded(150, 100, 200, pad_days=0) is True
-
-    def test_with_padding(self):
-        assert in_leaf_on_padded(90, 100, 200, pad_days=15) is True
-
-    def test_padding_outside(self):
-        assert in_leaf_on_padded(50, 100, 200, pad_days=10) is False
-
-
-class TestNormFilename:
-    """Tests for norm_filename function."""
-
-    def test_normalize(self):
-        assert norm_filename("TestFile.TIF") == "testfile.tif"
-
-    def test_with_spaces(self):
-        assert norm_filename("  TestFile  ") == "testfile"
 
 
 class TestRemapPlatform:

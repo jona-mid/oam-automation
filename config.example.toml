@@ -1,5 +1,0 @@
-download_mode = "selected"
-pad_days = 30
-forest_min = 0
-forest_max = 100
-platform = ["uav", "aircraft"]

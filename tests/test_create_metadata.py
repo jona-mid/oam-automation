@@ -249,35 +249,3 @@ class TestLoadUploadedFilenames:
         assert result == set()
 
 
-class TestMatchTifToCsv:
-    """Tests for matching TIF filenames to CSV rows."""
-
-    def test_match_exact_filename(self):
-        """Test matching exact filename."""
-        csv_rows = [{"filename": "img001.tif"}]
-
-        from utils import match_tif_to_csv
-
-        result = match_tif_to_csv("img001.tif", csv_rows)
-
-        assert result is not None
-
-    def test_match_without_extension(self):
-        """Test matching filename without extension."""
-        csv_rows = [{"filename": "img001.tif"}]
-
-        from utils import match_tif_to_csv
-
-        result = match_tif_to_csv("img001", csv_rows)
-
-        assert result is not None
-
-    def test_no_match(self):
-        """Test when no match is found."""
-        csv_rows = [{"filename": "img001.tif"}]
-
-        from utils import match_tif_to_csv
-
-        result = match_tif_to_csv("img999.tif", csv_rows)
-
-        assert result is None

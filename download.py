@@ -163,7 +163,7 @@ def cmd_tifs(args):
     be run after all TIF downloads are complete."""
     logger = configure_download_logging("tif_download.log")
 
-    if not args.all and not os.path.exists(args.thumbnails_dir):
+    if not os.path.exists(args.thumbnails_dir):
         logger.error(f"Thumbnails directory not found: {args.thumbnails_dir}")
         return 1
 
@@ -187,28 +187,16 @@ def cmd_tifs(args):
     downloaded_files = load_download_state(state_file)
     logger.info(f"Loaded state: {len(downloaded_files)} files previously downloaded")
 
-    if args.all:
-        thumbnail_bases = None
-        logger.info("All-download mode: using every row in the filtered CSV")
-    else:
-        thumbnail_files = [f for f in os.listdir(args.thumbnails_dir) if f.endswith(".png")]
-        logger.info(f"Found {len(thumbnail_files)} thumbnail files")
-        thumbnail_bases = {f[:-4]: f for f in thumbnail_files}
+    thumbnail_files = [f for f in os.listdir(args.thumbnails_dir) if f.endswith(".png")]
+    logger.info(f"Found {len(thumbnail_files)} thumbnail files")
+    thumbnail_bases = {f[:-4]: f for f in thumbnail_files}
 
     tasks = []
     skipped = 0
     not_found = 0
 
-    rows_to_download = df.to_dict("records") if thumbnail_bases is None else []
-    iterator = rows_to_download if thumbnail_bases is None else thumbnail_bases.items()
-    for item in iterator:
-        if thumbnail_bases is None:
-            thumbnail_file = ""
-            row = item
-            matching = pd.DataFrame([row])
-        else:
-            base_name, thumbnail_file = item
-            matching = df[df["uuid"].str.contains(base_name, na=False)]
+    for base_name, thumbnail_file in thumbnail_bases.items():
+        matching = df[df["uuid"].str.contains(base_name, na=False)]
 
         if matching.empty:
             logger.warning(f"No matching CSV row for thumbnail: {thumbnail_file}")
@@ -287,11 +275,6 @@ def main():
     )
     p_tif.add_argument("--output-dir", default="tifs", help="Output directory")
     p_tif.add_argument("--workers", type=int, default=8, help="Parallel workers")
-    p_tif.add_argument(
-        "--all",
-        action="store_true",
-        help="Download every row in the CSV instead of only rows with local thumbnails",
-    )
     p_tif.set_defaults(func=cmd_tifs)
 
     args = parser.parse_args()

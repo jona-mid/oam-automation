@@ -3,14 +3,13 @@
 Extract MODIS phenology data for bounding boxes.
 
 This script extracts leaf-on phenology timing (start and end Day of Year)
-from the MODIS phenology dataset for TIF file bounding boxes and adds
-this information to the metadata CSV.
+from the MODIS phenology dataset for the bounding boxes in the OAM metadata
+CSV and adds this information to it.
 """
 
 import xarray as xr
 import pandas as pd
 import numpy as np
-import rasterio
 from rasterio import crs
 from rasterio.warp import transform
 from pathlib import Path
@@ -48,7 +47,6 @@ DEFAULT_PHENOLOGY_PATH = str(
     / "modis_pheno_processed_v3.zarr"
 )
 DEFAULT_METADATA_CSV = str(_REPO_ROOT / "tif_metadata.csv")
-DEFAULT_TIF_DIR = str(_REPO_ROOT / "tifs")
 
 
 def load_phenology_data(zarr_path: str = DEFAULT_PHENOLOGY_PATH) -> xr.DataArray:
@@ -148,33 +146,6 @@ def extract_phenology_for_bbox(
             f"Error extracting phenology for bbox ({bbox_min_lon}, {bbox_min_lat}, {bbox_max_lon}, {bbox_max_lat}): {e}"
         )
         return None, None
-
-
-def extract_bbox_from_tif(tif_path: str) -> Tuple[float, float, float, float]:
-    """
-    Extract bounding box from TIF file metadata.
-
-    Args:
-        tif_path: Path to TIF file
-
-    Returns:
-        Tuple of (min_lon, min_lat, max_lon, max_lat) in WGS84
-    """
-    with rasterio.open(tif_path) as src:
-        bounds = src.bounds  # (left, bottom, right, top)
-
-        # Transform to WGS84 if needed
-        if src.crs != WGS84_CRS:
-            # Transform corners to WGS84
-            min_lon, min_lat = transform(
-                src.crs, WGS84_CRS, [bounds.left], [bounds.bottom]
-            )
-            max_lon, max_lat = transform(
-                src.crs, WGS84_CRS, [bounds.right], [bounds.top]
-            )
-            return min_lon[0], min_lat[0], max_lon[0], max_lat[0]
-        else:
-            return bounds.left, bounds.bottom, bounds.right, bounds.top
 
 
 def parse_date_to_doy(date_str: Optional[str]) -> Optional[int]:
@@ -347,87 +318,6 @@ def process_bboxes_from_csv(
     return df
 
 
-def process_bboxes_from_tifs(
-    tif_dir: str = DEFAULT_TIF_DIR,
-    output_csv: str = "tif_phenology.csv",
-    phenology_path: str = DEFAULT_PHENOLOGY_PATH,
-) -> pd.DataFrame:
-    """
-    Extract bounding boxes from TIF files and add phenology data.
-
-    Args:
-        tif_dir: Directory containing TIF files
-        output_csv: Path to output CSV file
-        phenology_path: Path to phenology zarr dataset
-
-    Returns:
-        DataFrame with TIF filenames, bounding boxes, and phenology data
-    """
-    logger.info(f"Processing TIF files from directory: {tif_dir}")
-
-    # Find all TIF files
-    tif_files = list(Path(tif_dir).glob("*.tif")) + list(Path(tif_dir).glob("*.tiff"))
-    logger.info(f"Found {len(tif_files)} TIF files")
-
-    if len(tif_files) == 0:
-        logger.warning(f"No TIF files found in {tif_dir}")
-        return pd.DataFrame()
-
-    # Load phenology data
-    pheno_data = load_phenology_data(phenology_path)
-
-    # Process each TIF file
-    results = []
-    for idx, tif_path in enumerate(tif_files):
-        if idx % 100 == 0:
-            logger.info(f"Processing TIF {idx}/{len(tif_files)}")
-
-        try:
-            # Extract bounding box from TIF
-            min_lon, min_lat, max_lon, max_lat = extract_bbox_from_tif(str(tif_path))
-
-            # Extract phenology
-            start_doy, end_doy = extract_phenology_for_bbox(
-                min_lon, min_lat, max_lon, max_lat, pheno_data
-            )
-
-            results.append(
-                {
-                    "filename": tif_path.name,
-                    "bbox_min_lon": min_lon,
-                    "bbox_min_lat": min_lat,
-                    "bbox_max_lon": max_lon,
-                    "bbox_max_lat": max_lat,
-                    "pheno_start_doy": start_doy,
-                    "pheno_end_doy": end_doy,
-                }
-            )
-
-        except Exception as e:
-            logger.error(f"Error processing {tif_path.name}: {e}")
-
-    # Create dataframe and save
-    df = pd.DataFrame(results)
-    df.to_csv(output_csv, index=False)
-    logger.info(f"Saved results to {output_csv}")
-
-    # Print summary statistics
-    valid_count = df["pheno_start_doy"].notna().sum()
-    logger.info(
-        f"Successfully extracted phenology for {valid_count}/{len(df)} TIF files"
-    )
-
-    if valid_count > 0:
-        logger.info(
-            f"Phenology start DOY range: {df['pheno_start_doy'].min():.1f} - {df['pheno_start_doy'].max():.1f}"
-        )
-        logger.info(
-            f"Phenology end DOY range: {df['pheno_end_doy'].min():.1f} - {df['pheno_end_doy'].max():.1f}"
-        )
-
-    return df
-
-
 def main():
     """Main entry point for the script."""
     import argparse
@@ -436,16 +326,7 @@ def main():
         description="Extract MODIS phenology data for bounding boxes"
     )
     parser.add_argument(
-        "--mode",
-        choices=["csv", "tif"],
-        default="csv",
-        help="Processing mode: csv (from metadata CSV) or tif (from TIF files)",
-    )
-    parser.add_argument(
         "--csv", default=DEFAULT_METADATA_CSV, help="Path to metadata CSV file"
-    )
-    parser.add_argument(
-        "--tif-dir", default=DEFAULT_TIF_DIR, help="Directory containing TIF files"
     )
     parser.add_argument(
         "--output",
@@ -465,18 +346,12 @@ def main():
 
     args = parser.parse_args()
 
-    if args.mode == "csv":
-        process_bboxes_from_csv(
-            csv_path=args.csv,
-            output_path=args.output,
-            phenology_path=args.phenology,
-            pad_days=args.pad_days,
-        )
-    elif args.mode == "tif":
-        output_csv = args.output if args.output else "tif_phenology.csv"
-        process_bboxes_from_tifs(
-            tif_dir=args.tif_dir, output_csv=output_csv, phenology_path=args.phenology
-        )
+    process_bboxes_from_csv(
+        csv_path=args.csv,
+        output_path=args.output,
+        phenology_path=args.phenology,
+        pad_days=args.pad_days,
+    )
 
 
 if __name__ == "__main__":
