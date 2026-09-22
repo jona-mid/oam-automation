@@ -13,6 +13,7 @@ scrape -> filter -> phenology -> thumbnails -> tifs -> jpegs -> metadata
 - `pipeline.py` is the resumable pipeline: each stage is skipped if its output already exists, so an interrupted run continues where it stopped.
 - The upload gate keeps only images with MODIS `in_season`, VLM `leaf_on`, and `review_status == success`.
 - `deadtrees_seam.py` does the actual upload. It uses the `deadtrees-cli` from the monorepo, logs in fresh for every file, and asks the platform whether the filename already exists before uploading.
+- The uploaded metadata matches the ledger schema. The license is taken from the OAM record instead of assuming CC BY for everything. If a record has a license we don't recognize, the upload is rejected rather than guessing.
 
 ## Usage
 
