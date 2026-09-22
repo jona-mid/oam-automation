@@ -434,6 +434,13 @@ class TestResolveUploadedAfter:
         )
         assert oam_weekly.resolve_uploaded_after(None, status) == "2026-08-01"
 
+    def test_garbage_scrape_value_falls_back_to_timestamp(self, tmp_path):
+        status = tmp_path / "last_run.txt"
+        status.write_text(
+            "timestamp: 2026-08-01T10:00:00\nscrape_uploaded_at: garbage\n", encoding="utf-8"
+        )
+        assert oam_weekly.resolve_uploaded_after(None, status) == "2026-08-01"
+
     def test_missing_status_file_yields_none(self, tmp_path):
         assert oam_weekly.resolve_uploaded_after(None, tmp_path / "missing.txt") is None
 
@@ -808,6 +815,117 @@ class TestMainUploadedBeforeGuard:
         status_text = (tmp_path / "last_run.txt").read_text(encoding="utf-8")
         assert "uploaded_before: 2026-09-07" in status_text
         assert "exit: success" in status_text
+
+
+class TestMainRecoveryAndManifestChecks:
+    def _argv(self, tmp_path, extra):
+        return [
+            "--output-dir",
+            str(tmp_path / "run"),
+            "--uploaded-csv",
+            str(tmp_path / "ledger.csv"),
+            "--status-file",
+            str(tmp_path / "last_run.txt"),
+            *extra,
+        ]
+
+    def _seed_dir(self, tmp_path, manifest_config=None, scrape="2026-09-19T10:00:00+00:00"):
+        run_dir = tmp_path / "run"
+        (run_dir / "metadata").mkdir(parents=True, exist_ok=True)
+        _write_csv(
+            run_dir / "metadata" / "filtered.csv", ["uuid", "uploaded_at"], [["1", scrape]]
+        )
+        if manifest_config is not None:
+            (run_dir / "run_manifest.json").write_text(
+                json.dumps({"config": manifest_config}), encoding="utf-8"
+            )
+        return run_dir
+
+    def _seed_chain(self, tmp_path, value="2026-09-06"):
+        status = tmp_path / "last_run.txt"
+        status.write_text(
+            f"timestamp: 2026-09-06T10:00:00\nscrape_uploaded_at: {value}\n", encoding="utf-8"
+        )
+        return status
+
+    def test_dry_run_with_explicit_flags_into_mismatched_dir_aborts(self, tmp_path, monkeypatch, capsys):
+        self._seed_dir(tmp_path, {"uploaded_after_date": "2026-09-01", "uploaded_before_date": "None"})
+        (tmp_path / "run" / "metadata" / "phenology_report.csv").write_text("filename\n", encoding="utf-8")
+
+        def no_pipeline(*args, **kwargs):
+            raise AssertionError("pipeline must not be touched by a dry run")
+
+        monkeypatch.setattr(oam_weekly, "run_pipeline", no_pipeline)
+        result = oam_weekly.main(self._argv(tmp_path, ["--dry-run", "--uploaded-after", "2026-09-12"]))
+        assert result == 1
+        assert "already holds a different window" in capsys.readouterr().out
+
+    def test_plain_dry_run_into_mismatched_dir_proceeds(self, tmp_path, monkeypatch):
+        self._seed_dir(tmp_path, {"uploaded_after_date": "2026-09-01", "uploaded_before_date": "None"})
+        (tmp_path / "run" / "metadata" / "phenology_report.csv").write_text("filename\n", encoding="utf-8")
+        status = self._seed_chain(tmp_path)
+        monkeypatch.setattr(oam_weekly, "load_gate_candidates", lambda run_dir: pd.DataFrame())
+        monkeypatch.setattr(
+            oam_weekly,
+            "prepare_candidates",
+            lambda gate, ledger, run_dir, server_check: oam_weekly.Preparation(0, [], 0),
+        )
+        result = oam_weekly.main(self._argv(tmp_path, ["--dry-run"]))
+        assert result == 0
+        assert "scrape_uploaded_at: 2026-09-06" in status.read_text(encoding="utf-8")
+
+    def test_fail_open_warns_when_manifest_missing(self, tmp_path, monkeypatch, capsys):
+        self._seed_dir(tmp_path, manifest_config=None)
+        self._seed_chain(tmp_path)
+        monkeypatch.setattr(oam_weekly, "run_pipeline", lambda *a, **k: None)
+        monkeypatch.setattr(oam_weekly, "load_gate_candidates", lambda run_dir: pd.DataFrame())
+        monkeypatch.setattr(
+            oam_weekly,
+            "prepare_candidates",
+            lambda gate, ledger, run_dir, server_check: oam_weekly.Preparation(0, [], 0),
+        )
+        result = oam_weekly.main(self._argv(tmp_path, ["--uploaded-after", "2026-09-06"]))
+        assert result == 0
+        assert "cannot be verified" in capsys.readouterr().out
+
+    def test_failed_window_run_hint_includes_before_flag(self, tmp_path, monkeypatch, capsys):
+        self._seed_dir(tmp_path, {"uploaded_after_date": "2026-09-06", "uploaded_before_date": "2026-09-20"})
+        self._seed_chain(tmp_path)
+        spec = oam_weekly.UploadSpec("a.tif", tmp_path / "a.tif", {"authors": ["x"]})
+        monkeypatch.setattr(oam_weekly, "run_pipeline", lambda *a, **k: None)
+        monkeypatch.setattr(oam_weekly, "load_gate_candidates", lambda run_dir: pd.DataFrame())
+        monkeypatch.setattr(
+            oam_weekly,
+            "prepare_candidates",
+            lambda gate, ledger, run_dir, server_check: oam_weekly.Preparation(1, [spec], 0),
+        )
+
+        def failing_upload(tif_path, **kwargs):
+            raise RuntimeError("platform down")
+
+        monkeypatch.setattr(oam_weekly.deadtrees_seam, "upload_and_process", failing_upload)
+        result = oam_weekly.main(
+            self._argv(tmp_path, ["--uploaded-after", "2026-09-06", "--uploaded-before", "2026-09-20"])
+        )
+        assert result == 1
+        out = capsys.readouterr().out
+        assert "--uploaded-after 2026-09-06 --uploaded-before 2026-09-20" in out
+        assert "1 upload(s) failed" in out
+
+    def test_aborted_run_after_scrape_prints_recovery_hint(self, tmp_path, monkeypatch, capsys):
+        self._seed_dir(tmp_path, {"uploaded_after_date": "2026-09-06", "uploaded_before_date": "None"})
+        self._seed_chain(tmp_path)
+
+        def broken_gate(run_dir):
+            raise RuntimeError("VLM report unreadable")
+
+        monkeypatch.setattr(oam_weekly, "run_pipeline", lambda *a, **k: None)
+        monkeypatch.setattr(oam_weekly, "load_gate_candidates", broken_gate)
+        result = oam_weekly.main(self._argv(tmp_path, ["--uploaded-after", "2026-09-06"]))
+        assert result == 1
+        out = capsys.readouterr().out
+        assert "the run aborted" in out
+        assert "--uploaded-after 2026-09-06" in out
 
 
 class TestParseArgs:

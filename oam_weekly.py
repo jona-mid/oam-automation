@@ -183,7 +183,8 @@ def advance_scrape_uploaded_at(
             f"this run's window starts {window_after.isoformat()}, after the chain point "
             f"{stored_date.isoformat()}; uploads in [{stored_date.isoformat()}, "
             f"{window_after.isoformat()}) were not covered; keeping the chain at "
-            f"{stored_date.isoformat()} (re-run with --uploaded-after {stored_date.isoformat()} to cover the gap)"
+            f"{stored_date.isoformat()} (re-run with --uploaded-after {stored_date.isoformat()} "
+            "and a fresh --output-dir to cover the gap)"
         )
         return stored_date.isoformat(), warning
     return max(stored_date, scrape_date).isoformat(), None
@@ -343,20 +344,14 @@ def resolve_uploaded_after(explicit: Optional[str], status_file: Path) -> Option
     if explicit:
         return explicit
     if status_file.exists():
-        scrape_at = None
-        stamp_date = None
-        for line in status_file.read_text(encoding="utf-8").splitlines():
-            if line.startswith("scrape_uploaded_at:"):
-                value = line.split(":", 1)[1].strip()
-                if value:
-                    scrape_at = value
-            elif line.startswith("timestamp:"):
-                stamp = line.split(":", 1)[1].strip()
-                stamp_date = stamp.split("T")[0]
+        scrape_at = read_scrape_uploaded_at(status_file)
         if scrape_at:
             return scrape_at
-        if stamp_date:
-            return stamp_date
+        for line in status_file.read_text(encoding="utf-8").splitlines():
+            if line.startswith("timestamp:"):
+                stamp_date = line.split(":", 1)[1].strip().split("T")[0]
+                if stamp_date:
+                    return stamp_date
     return None
 
 
@@ -479,25 +474,36 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"Dry run needs an existing run dir with pipeline outputs; none at {run_dir}"
             )
 
-        if not args.dry_run:
-            if uploaded_after is None:
-                raise RuntimeError(
-                    "--uploaded-after is required for the first run "
-                    "(no status file found to derive the last run date from); "
-                    "this prevents an accidental full-catalog VLM audit"
-                )
-            # A reused run dir silently keeps the previous window's scrape
-            # outputs (the pipeline skips existing stages) while the status
-            # file would record this run's window. Abort on mismatch.
+        if not args.dry_run and uploaded_after is None:
+            raise RuntimeError(
+                "--uploaded-after is required for the first run "
+                "(no status file found to derive the last run date from); "
+                "this prevents an accidental full-catalog VLM audit"
+            )
+
+        # A reused run dir silently keeps the previous window's scrape
+        # outputs (the pipeline skips existing stages) while the status
+        # file would record this run's window. Abort on mismatch. Dry runs
+        # without explicit window flags just inspect whatever the dir
+        # holds, so they skip the check.
+        explicit_window = args.uploaded_after is not None or args.uploaded_before is not None
+        if not args.dry_run or explicit_window:
             filtered_csv = run_dir / "metadata" / "filtered.csv"
             manifest_path = run_dir / "run_manifest.json"
-            if filtered_csv.exists() and manifest_path.exists():
-                try:
-                    config = json.loads(manifest_path.read_text(encoding="utf-8"))["config"]
-                    recorded = (config.get("uploaded_after_date"), config.get("uploaded_before_date"))
-                except (OSError, ValueError, KeyError, TypeError):
-                    recorded = None
-                if recorded is not None:
+            if filtered_csv.exists():
+                recorded = None
+                if manifest_path.exists():
+                    try:
+                        config = json.loads(manifest_path.read_text(encoding="utf-8"))["config"]
+                        recorded = (config.get("uploaded_after_date"), config.get("uploaded_before_date"))
+                    except (OSError, ValueError, KeyError, TypeError):
+                        recorded = None
+                if recorded is None:
+                    print(
+                        f"  ! {run_dir} holds scrape outputs without a readable "
+                        f"{manifest_path.name}; its recorded window cannot be verified"
+                    )
+                else:
                     # The pipeline writes manifest config values with str(); normalize both sides.
                     def window_text(value):
                         return "None" if value is None else str(value)
@@ -511,6 +517,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                             f"requested after={uploaded_after!r}, before={args.uploaded_before!r}); "
                             "use a fresh --output-dir for each ad-hoc window"
                         )
+
+        if not args.dry_run:
             run_pipeline(ROOT, run_dir, uploaded_after, args.uploaded_before)
 
         gate = load_gate_candidates(run_dir)
@@ -542,11 +550,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"Summary: {counts.candidates} candidates, "
                 f"{counts.uploaded} uploaded, {counts.failed} failed."
             )
-            if counts.failed:
-                print(
-                    f"  ! {counts.failed} upload(s) failed and are NOT covered by the next "
-                    f"auto window; to retry, re-run with --uploaded-after {uploaded_after}"
-                )
             exit_status = "success" if counts.failed == 0 else "failed"
     except Exception as error:
         print(f"Run aborted: {error}")
@@ -569,6 +572,27 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             if chain_warning:
                 print(f"  ! {chain_warning}")
+            # Recovery hint for any failed run whose window the next auto
+            # run will not re-cover: either the chain advanced past
+            # unuploaded data, or the window reached below the chain (a
+            # rewind run that died partway).
+            if exit_status == "failed" and uploaded_after and chain_value:
+                advanced = chain_value != stored_scrape
+                below_chain = False
+                try:
+                    below_chain = date.fromisoformat(uploaded_after) < date.fromisoformat(chain_value)
+                except ValueError:
+                    below_chain = False
+                if advanced or below_chain:
+                    retry_flags = f"--uploaded-after {uploaded_after}"
+                    if args.uploaded_before:
+                        retry_flags += f" --uploaded-before {args.uploaded_before}"
+                    detail = f"{counts.failed} upload(s) failed" if counts.failed else "the run aborted"
+                    print(
+                        f"  ! {detail}; this window is not re-covered by the next auto run; "
+                        f"to retry, re-run with {retry_flags} into a fresh --output-dir "
+                        "(or the same dir with the same window flags)"
+                    )
         write_status(
             status_file,
             run_dir,
