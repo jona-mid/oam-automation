@@ -12,13 +12,12 @@ gitignored `.env`; see OAM_UPLOADED_CSV below.
 import argparse
 import csv
 import os
-import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import List, NamedTuple, Optional, Set, Tuple
+from typing import List, NamedTuple, Optional, Set
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -71,8 +70,10 @@ def format_en_date(value: date) -> str:
     return f"{value:%B} {value.day}, {value:%Y}"
 
 
-def run_pipeline(repo_root: Path, run_dir: Path) -> None:
+def run_pipeline(repo_root: Path, run_dir: Path, uploaded_after: Optional[str] = None) -> None:
     command = [sys.executable, str(repo_root / "pipeline.py"), "--output-dir", str(run_dir)]
+    if uploaded_after:
+        command += ["--uploaded-after-date", uploaded_after]
     print("+", " ".join(command))
     subprocess.run(command, cwd=repo_root, check=True)
 
@@ -164,12 +165,13 @@ def append_ledger_row(csv_path: Path, filename: str, kwargs: dict) -> None:
         )
 
 
-def write_status(path: Path, run_dir: Path, dry_run: bool, counts: RunCounts, exit_status: str) -> None:
+def write_status(path: Path, run_dir: Path, dry_run: bool, counts: RunCounts, exit_status: str, uploaded_after: Optional[str] = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
         f"run_dir: {run_dir}",
         f"dry_run: {dry_run}",
+        f"uploaded_after: {uploaded_after or ''}",
         f"candidates: {counts.candidates}",
         f"uploaded: {counts.uploaded}",
         f"failed: {counts.failed}",
@@ -208,6 +210,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Skip the server-side duplicate check (diff leg 2)",
     )
+    parser.add_argument(
+        "--uploaded-after",
+        default=None,
+        help="Scrape only OAM uploads on/after this date (YYYY-MM-DD); "
+        "default: the date of the last run's status file; first run requires it",
+    )
     args = parser.parse_args(argv)
     if args.uploaded_csv is None:
         env_value = os.environ.get("OAM_UPLOADED_CSV", "").strip()
@@ -216,6 +224,18 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     if args.uploaded_csv is None:
         parser.error("--uploaded-csv or OAM_UPLOADED_CSV is required")
     return args
+
+
+def resolve_uploaded_after(explicit: Optional[str], status_file: Path) -> Optional[str]:
+    """Explicit flag wins; else the date of the last run's status timestamp."""
+    if explicit:
+        return explicit
+    if status_file.exists():
+        for line in status_file.read_text(encoding="utf-8").splitlines():
+            if line.startswith("timestamp:"):
+                stamp = line.split(":", 1)[1].strip()
+                return stamp.split("T")[0]
+    return None
 
 
 def prepare_candidates(
@@ -271,6 +291,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     run_dir = (args.output_dir or ROOT / "runs" / datetime.now().strftime("%Y-%m-%d")).resolve()
     status_file = (args.status_file or run_dir.parent / "last_run.txt").resolve()
+    uploaded_after = resolve_uploaded_after(args.uploaded_after, status_file)
 
     counts = RunCounts()
     exit_status = "failed"
@@ -281,7 +302,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
 
         if not args.dry_run:
-            run_pipeline(ROOT, run_dir)
+            if uploaded_after is None:
+                raise RuntimeError(
+                    "--uploaded-after is required for the first run "
+                    "(no status file found to derive the last run date from); "
+                    "this prevents an accidental full-catalog VLM audit"
+                )
+            run_pipeline(ROOT, run_dir, uploaded_after)
 
         gate = load_gate_candidates(run_dir)
         ledger = load_ledger_filenames(args.uploaded_csv)
@@ -317,7 +344,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Run aborted: {error}")
         exit_status = "failed"
     finally:
-        write_status(status_file, run_dir, args.dry_run, counts, exit_status)
+        write_status(status_file, run_dir, args.dry_run, counts, exit_status, uploaded_after)
 
     return 0 if exit_status in ("success", "dry-run") else 1
 

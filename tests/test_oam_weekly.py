@@ -334,6 +334,75 @@ class TestWriteStatus:
         assert "exit: failed" in text
         assert "dry_run: False" in text
 
+    def test_status_file_records_uploaded_after(self, tmp_path):
+        status = tmp_path / "last_run.txt"
+        counts = oam_weekly.RunCounts()
+        oam_weekly.write_status(status, tmp_path / "run", True, counts, "dry-run", "2026-09-21")
+        text = status.read_text(encoding="utf-8")
+        assert "uploaded_after: 2026-09-21" in text
+
+
+class TestResolveUploadedAfter:
+    def test_explicit_flag_wins(self, tmp_path):
+        status = tmp_path / "last_run.txt"
+        status.write_text("timestamp: 2026-08-01T10:00:00\n", encoding="utf-8")
+        assert oam_weekly.resolve_uploaded_after("2026-09-01", status) == "2026-09-01"
+
+    def test_derives_date_from_status_file(self, tmp_path):
+        status = tmp_path / "last_run.txt"
+        status.write_text("timestamp: 2026-08-01T10:00:00\nexit: success\n", encoding="utf-8")
+        assert oam_weekly.resolve_uploaded_after(None, status) == "2026-08-01"
+
+    def test_missing_status_file_yields_none(self, tmp_path):
+        assert oam_weekly.resolve_uploaded_after(None, tmp_path / "missing.txt") is None
+
+
+class TestRunPipelineCommand:
+    def test_without_uploaded_after(self, monkeypatch, tmp_path):
+        captured = {}
+
+        def fake_run(command, cwd=None, check=None):
+            captured["command"] = command
+            return 0
+
+        monkeypatch.setattr(oam_weekly.subprocess, "run", fake_run)
+        oam_weekly.run_pipeline(tmp_path, tmp_path / "run")
+        assert "--uploaded-after-date" not in captured["command"]
+
+    def test_with_uploaded_after(self, monkeypatch, tmp_path):
+        captured = {}
+
+        def fake_run(command, cwd=None, check=None):
+            captured["command"] = command
+            return 0
+
+        monkeypatch.setattr(oam_weekly.subprocess, "run", fake_run)
+        oam_weekly.run_pipeline(tmp_path, tmp_path / "run", "2026-09-14")
+        assert captured["command"][-2:] == ["--uploaded-after-date", "2026-09-14"]
+
+
+class TestMainUploadedAfterGuard:
+    def test_first_run_without_uploaded_after_fails_before_pipeline(self, tmp_path, monkeypatch):
+        def no_pipeline(*args, **kwargs):
+            raise AssertionError("pipeline must not run without an uploaded-after date")
+
+        monkeypatch.setattr(oam_weekly, "run_pipeline", no_pipeline)
+        status = tmp_path / "last_run.txt"
+        result = oam_weekly.main(
+            [
+                "--output-dir",
+                str(tmp_path / "run"),
+                "--uploaded-csv",
+                str(tmp_path / "ledger.csv"),
+                "--status-file",
+                str(status),
+            ]
+        )
+        assert result == 1
+        text = status.read_text(encoding="utf-8")
+        assert "exit: failed" in text
+        assert "uploaded_after" in text
+
 
 class TestParseArgs:
     def test_env_var_used_as_default(self, monkeypatch):
@@ -350,3 +419,7 @@ class TestParseArgs:
         monkeypatch.delenv("OAM_UPLOADED_CSV", raising=False)
         with pytest.raises(SystemExit):
             oam_weekly.parse_args([])
+
+    def test_uploaded_after_defaults_to_none(self):
+        args = oam_weekly.parse_args(["--uploaded-csv", "ledger.csv"])
+        assert args.uploaded_after is None

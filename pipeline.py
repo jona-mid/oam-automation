@@ -31,8 +31,8 @@ def main():
     parser.add_argument("--selection-dir", type=Path, default=None)
     parser.add_argument("--uploaded-after-date", default=None)
     parser.add_argument("--uploaded-before-date", default=None)
-    parser.add_argument("--forest-min", type=float, default=0)
-    parser.add_argument("--forest-max", type=float, default=100)
+    parser.add_argument("--forest-min", type=float, default=None)
+    parser.add_argument("--forest-max", type=float, default=None)
     parser.add_argument("--platform", nargs="+", default=["uav", "aircraft"])
     parser.add_argument("--pad-days", type=int, default=30)
     parser.add_argument("--thumbnail-workers", type=int, default=8)
@@ -84,7 +84,8 @@ def main():
             command += ["--uploaded_after_date", args.uploaded_after_date]
         if args.uploaded_before_date:
             command += ["--uploaded_before_date", args.uploaded_before_date]
-        command += ["--forest_percentage_min", args.forest_min, "--forest_percentage_max", args.forest_max]
+        if args.forest_min is not None and args.forest_max is not None:
+            command += ["--forest_percentage_min", args.forest_min, "--forest_percentage_max", args.forest_max]
         run("filter.py", *command, cwd=output)
     manifest["stages"]["filter"] = {"output": str(filtered_csv)}
 

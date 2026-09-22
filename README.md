@@ -37,7 +37,9 @@ scrape -> filter -> phenology -> thumbnails -> tifs -> jpegs -> metadata
 - `SUPABASE_URL` / `SUPABASE_KEY` / `API_ENDPOINT` - platform endpoints
 - `OAM_UPLOADED_CSV` - canonical upload ledger path (default for `--uploaded-csv`; required unless the flag is given)
 
-`--dry-run` lists candidates and upload kwargs without uploading; `--skip-server-check` skips the platform-side duplicate check.
+`--dry-run` lists candidates and upload kwargs without uploading; `--skip-server-check` skips the platform-side duplicate check. `--uploaded-after YYYY-MM-DD` scrapes only uploads on/after that date; it defaults to the date of the last run's status file and the first run must pass it explicitly, so no run silently audits the full catalog.
+
+The Earth Engine forest-percentage filter (ESA WorldCover, `forest > 0`) is opt-in: `pipeline.py --forest-min 0 --forest-max 100` re-enables it. Without those bounds no Earth Engine call happens at all, and when enabled, an EE error rate above 10% aborts the filter stage instead of silently dropping records (errors used to be mapped to 0%, which once reduced 8,812 candidates to 36).
 
 ## Upstream sources
 
