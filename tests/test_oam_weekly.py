@@ -231,6 +231,14 @@ class TestPrepareCandidates:
             }
         )
 
+    @pytest.fixture(autouse=True)
+    def _offline_hash_leg(self, monkeypatch):
+        """Keep the content-hash leg deterministic and offline by default."""
+        monkeypatch.setattr(
+            deadtrees_seam, "file_hash", lambda path: "hash-" + path.name.lower()
+        )
+        monkeypatch.setattr(deadtrees_seam, "file_hashes_on_platform", lambda hashes: {})
+
     def test_happy_path_builds_spec(self, tmp_path):
         (tmp_path / "tifs").mkdir()
         (tmp_path / "tifs" / "a.tif").write_bytes(b"x")
@@ -290,6 +298,52 @@ class TestPrepareCandidates:
         prep = oam_weekly.prepare_candidates(gate, set(), tmp_path, server_check=True)
         # a.tif was confirmed absent before the failure; b.tif falls back to unchecked
         assert [spec.filename for spec in prep.specs] == ["a.tif", "b.tif"]
+
+    def test_platform_hash_match_skips(self, tmp_path, monkeypatch):
+        (tmp_path / "tifs").mkdir()
+        (tmp_path / "tifs" / "a.tif").write_bytes(b"x")
+        monkeypatch.setattr(
+            deadtrees_seam, "file_hashes_on_platform", lambda hashes: {"hash-a.tif": 42}
+        )
+        gate = pd.DataFrame([self._gate_row("a.tif")])
+        prep = oam_weekly.prepare_candidates(gate, set(), tmp_path, server_check=False)
+        assert prep.candidates == 0
+        assert prep.specs == []
+
+    def test_intra_batch_duplicate_skipped(self, tmp_path, monkeypatch):
+        (tmp_path / "tifs").mkdir()
+        (tmp_path / "tifs" / "a.tif").write_bytes(b"same")
+        (tmp_path / "tifs" / "b.tif").write_bytes(b"same")
+        monkeypatch.setattr(deadtrees_seam, "file_hash", lambda path: "same-hash")
+        gate = pd.DataFrame([self._gate_row("a.tif"), self._gate_row("b.tif")])
+        prep = oam_weekly.prepare_candidates(gate, set(), tmp_path, server_check=False)
+        assert [spec.filename for spec in prep.specs] == ["a.tif"]
+
+    def test_hash_leg_failure_degrades_to_keep_all(self, tmp_path, monkeypatch):
+        (tmp_path / "tifs").mkdir()
+        (tmp_path / "tifs" / "a.tif").write_bytes(b"x")
+
+        def broken(hashes):
+            raise ConnectionError("supabase down")
+
+        monkeypatch.setattr(deadtrees_seam, "file_hashes_on_platform", broken)
+        gate = pd.DataFrame([self._gate_row("a.tif")])
+        prep = oam_weekly.prepare_candidates(gate, set(), tmp_path, server_check=False)
+        assert prep.candidates == 1
+        assert len(prep.specs) == 1
+
+    def test_hash_leg_skips_files_without_tiff(self, tmp_path, monkeypatch):
+        gate = pd.DataFrame([self._gate_row("missing.tif")])
+        hashes_seen = {}
+
+        def capture(hashes):
+            hashes_seen["called_with"] = hashes
+            return {}
+
+        monkeypatch.setattr(deadtrees_seam, "file_hashes_on_platform", capture)
+        prep = oam_weekly.prepare_candidates(gate, set(), tmp_path, server_check=False)
+        assert prep.rejected == 1
+        assert hashes_seen["called_with"] == []
 
 
 class TestFormatEnDate:

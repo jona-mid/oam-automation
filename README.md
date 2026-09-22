@@ -30,7 +30,7 @@ python oam_weekly.py [--output-dir DIR] [--dry-run] [--skip-server-check]
 
 ## Reliability
 
-- **Dedup:** two legs, the local ledger CSV (`metadata_uploaded.csv`, canonical schema) and a server-side `file_name` check on the platform. A filename known to either is skipped.
+- **Dedup:** three legs, the local ledger CSV (`metadata_uploaded.csv`, canonical schema), a server-side `file_name` check on the platform, and a content hash that matches the platform's own hash (checked against the `orthos` table). A filename known to either of the first two, or a file whose content the platform already processed, is skipped.
 - **Retry:** failed uploads are logged per candidate and never appended to the ledger, so the next run retries them naturally.
 - **Crash recovery:** if a run dies after an upload succeeded but before its ledger append, reconcile by cross-checking platform datasets against the ledger and appending the missing row with `build_upload_kwargs` + `append_ledger_row` (exercised in practice, Sep 22, 2026).
 

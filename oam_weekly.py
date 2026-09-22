@@ -17,7 +17,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import List, NamedTuple, Optional, Set
+from typing import Any, List, NamedTuple, Optional, Set
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -266,6 +266,40 @@ def prepare_candidates(
                 f"skipping the check for the remaining {len(candidates) - checked} candidates"
             )
             candidates = kept + candidates[checked:]
+
+    if candidates:
+        # Content-hash leg: skip identical files the platform already has,
+        # and duplicates within this batch. Failure degrades like the
+        # server-check leg.
+        try:
+            hashes: Any = {}
+            for row in candidates:
+                filename = normalize_filename(row["filename"])
+                tif_path = run_dir / "tifs" / filename
+                if tif_path.exists():
+                    hashes[filename] = deadtrees_seam.file_hash(tif_path)
+            known = deadtrees_seam.file_hashes_on_platform(list(hashes.values()))
+        except Exception as error:
+            print(f"  ! Content-hash check unavailable ({error}); skipping the leg")
+        else:
+            kept = []
+            seen: Set[str] = set()
+            for row in candidates:
+                filename = normalize_filename(row["filename"])
+                file_hash = hashes.get(filename)
+                if file_hash and file_hash in known:
+                    print(
+                        f"  = {filename} same content already on the platform "
+                        f"as dataset {known[file_hash]}, skipping"
+                    )
+                    continue
+                if file_hash and file_hash in seen:
+                    print(f"  = {filename} duplicate of an earlier candidate in this run, skipping")
+                    continue
+                if file_hash:
+                    seen.add(file_hash)
+                kept.append(row)
+            candidates = kept
 
     specs: List[UploadSpec] = []
     rejected = 0
