@@ -2,7 +2,7 @@
 
 Weekly OpenAerialMap (OAM) harvest for deadtrees.earth: fetch new imagery, filter it, classify season with MODIS phenology, check tree-canopy leaf state with a VLM, and upload the qualifying images as new datasets. One command per week: `oam_weekly.py`.
 
-Lightweight: no GPU. The heaviest steps are downloading the GeoTIFFs and converting them to JPEG for the VLM check. A weekly run needs roughly 5 GB of disk.
+Lightweight: no GPU. The heaviest steps are downloading the GeoTIFFs and converting them to JPEG for the VLM check. Only in-season images are downloaded; a weekly run has needed up to about 5 GB of disk.
 
 ## Setup
 
@@ -116,6 +116,7 @@ scrape -> filter -> phenology -> thumbnails -> tifs -> jpegs -> metadata
 
 - **Pipeline:** `pipeline.py` runs the stages and is resumable. If a window has no filter-passing or no in-season images, it stops early and the run succeeds with 0 candidates.
 - **Filter:** keeps drone/aircraft imagery under 10 cm GSD with more than one band, uploaded inside the window.
+- **Phenology:** classifies each capture date against the MODIS leaf-on window at its location, widened by 30 days on each side (`pipeline.py --pad-days`). Only `in_season` images get thumbnails, TIFFs and a VLM check.
 - **Upload gate:** MODIS `in_season` and VLM `leaf_on` and a successful VLM review.
 - **Dedup:**
   - the local ledger;
@@ -133,7 +134,7 @@ scrape -> filter -> phenology -> thumbnails -> tifs -> jpegs -> metadata
 
 ## Notes
 
-- **Earth Engine forest filter:** the ESA WorldCover forest-percentage filter is kept but off by default. The VLM check covers the same concern, and Earth Engine can cost money. Enable it with `pipeline.py --forest-min 0 --forest-max 100` (needs Earth Engine auth).
+- **Earth Engine forest filter:** the ESA WorldCover forest-percentage filter is kept but off by default. The VLM check covers the same concern, and Earth Engine can cost money. `oam_weekly.py` never enables it. To try it, run `pipeline.py --forest-min 0 --forest-max 100` by hand (needs Earth Engine auth); `pipeline.py` does not load `.env`, so export `OPENROUTER_API_KEY` first. Enabling it in the weekly run means passing those flags from `run_pipeline()` in `oam_weekly.py`.
 - **VLM audit:** `aerial_phenology_audit.py` is copied verbatim from `aerial-phenology-audit`.
 - **MODIS phenology data:** a small zarr in `phenology/`.
 - **Tests:** `pip install pytest && python -m pytest`. They need no network, credentials or `deadtrees-cli`.

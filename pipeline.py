@@ -109,7 +109,9 @@ def main():
         return finish("no in-season images in the upload window")
 
     if not any(thumbnails.iterdir()):
-        run("download.py", "thumbnails", "--csv", pheno_csv, "--folder", thumbnails, "--workers", args.thumbnail_workers, cwd=output)
+        # Only in-season images can pass the upload gate; the TIFF download
+        # follows the thumbnails, so out-of-season TIFFs are never fetched.
+        run("download.py", "thumbnails", "--csv", pheno_csv, "--folder", thumbnails, "--season", "in_season", "--workers", args.thumbnail_workers, cwd=output)
     manifest["stages"]["thumbnails"] = {"files": count_files(thumbnails, {".png", ".jpg", ".jpeg"}), "output": str(thumbnails)}
 
     if not any(tifs.iterdir()):
