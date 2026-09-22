@@ -396,6 +396,35 @@ class TestWriteStatus:
         assert "uploaded_after: 2026-09-21" in text
         assert "scrape_uploaded_at: 2026-09-13" in text
 
+    def test_status_file_records_uploaded_before(self, tmp_path):
+        status = tmp_path / "last_run.txt"
+        counts = oam_weekly.RunCounts()
+        oam_weekly.write_status(
+            status, tmp_path / "run", True, counts, "dry-run", "2026-09-01", "2026-09-06", "2026-09-07"
+        )
+        text = status.read_text(encoding="utf-8")
+        assert "uploaded_before: 2026-09-07" in text
+
+    def test_uploaded_before_defaults_to_empty(self, tmp_path):
+        status = tmp_path / "last_run.txt"
+        counts = oam_weekly.RunCounts()
+        oam_weekly.write_status(status, tmp_path / "run", True, counts, "dry-run")
+        assert "uploaded_before: " in status.read_text(encoding="utf-8")
+
+    def test_scrape_uploaded_at_never_regresses(self, tmp_path):
+        status = tmp_path / "last_run.txt"
+        counts = oam_weekly.RunCounts()
+        # A weekly run sees data up to Sep 20; a later ad-hoc run of an old
+        # window sees only up to Sep 6 and must not drag the chain backwards.
+        oam_weekly.write_status(status, tmp_path / "run", False, counts, "success", None, "2026-09-20")
+        oam_weekly.write_status(status, tmp_path / "run", True, counts, "dry-run", None, "2026-09-06")
+        oam_weekly.write_status(status, tmp_path / "run", True, counts, "dry-run", None, None)
+        text = status.read_text(encoding="utf-8")
+        assert "scrape_uploaded_at: 2026-09-20" in text
+        # A genuinely newer scrape still advances the chain.
+        oam_weekly.write_status(status, tmp_path / "run", False, counts, "success", None, "2026-09-27")
+        assert "scrape_uploaded_at: 2026-09-27" in status.read_text(encoding="utf-8")
+
 
 class TestResolveUploadedAfter:
     def test_explicit_flag_wins(self, tmp_path):
@@ -470,6 +499,33 @@ class TestRunPipelineCommand:
         oam_weekly.run_pipeline(tmp_path, tmp_path / "run", "2026-09-14")
         assert captured["command"][-2:] == ["--uploaded-after-date", "2026-09-14"]
 
+    def test_weekly_default_has_no_before_bound(self, monkeypatch, tmp_path):
+        captured = {}
+
+        def fake_run(command, cwd=None, check=None):
+            captured["command"] = command
+            return 0
+
+        monkeypatch.setattr(oam_weekly.subprocess, "run", fake_run)
+        oam_weekly.run_pipeline(tmp_path, tmp_path / "run", "2026-09-14")
+        assert "--uploaded-before-date" not in captured["command"]
+
+    def test_with_uploaded_before(self, monkeypatch, tmp_path):
+        captured = {}
+
+        def fake_run(command, cwd=None, check=None):
+            captured["command"] = command
+            return 0
+
+        monkeypatch.setattr(oam_weekly.subprocess, "run", fake_run)
+        oam_weekly.run_pipeline(tmp_path, tmp_path / "run", "2026-09-01", "2026-09-07")
+        assert captured["command"][-4:] == [
+            "--uploaded-after-date",
+            "2026-09-01",
+            "--uploaded-before-date",
+            "2026-09-07",
+        ]
+
 
 class TestMainUploadedAfterGuard:
     def test_first_run_without_uploaded_after_fails_before_pipeline(self, tmp_path, monkeypatch):
@@ -494,6 +550,71 @@ class TestMainUploadedAfterGuard:
         assert "uploaded_after" in text
 
 
+class TestMainUploadedBeforeGuard:
+    def _argv(self, tmp_path, extra):
+        return [
+            "--output-dir",
+            str(tmp_path / "run"),
+            "--uploaded-csv",
+            str(tmp_path / "ledger.csv"),
+            "--status-file",
+            str(tmp_path / "last_run.txt"),
+            *extra,
+        ]
+
+    def test_before_without_resolvable_after_fails_before_pipeline(self, tmp_path, monkeypatch):
+        def no_pipeline(*args, **kwargs):
+            raise AssertionError("pipeline must not run for a before-bound without an after date")
+
+        monkeypatch.setattr(oam_weekly, "run_pipeline", no_pipeline)
+        result = oam_weekly.main(self._argv(tmp_path, ["--uploaded-before", "2026-09-07"]))
+        assert result == 1
+        assert "exit: failed" in (tmp_path / "last_run.txt").read_text(encoding="utf-8")
+
+    def test_before_leaving_no_common_period_fails(self, tmp_path, monkeypatch):
+        def no_pipeline(*args, **kwargs):
+            raise AssertionError("pipeline must not run when the window is empty")
+
+        monkeypatch.setattr(oam_weekly, "run_pipeline", no_pipeline)
+        result = oam_weekly.main(
+            self._argv(tmp_path, ["--uploaded-after", "2026-09-07", "--uploaded-before", "2026-09-07"])
+        )
+        assert result == 1
+
+    def test_before_without_after_at_all_fails(self, tmp_path, monkeypatch):
+        def no_pipeline(*args, **kwargs):
+            raise AssertionError("pipeline must not run for an empty window")
+
+        monkeypatch.setattr(oam_weekly, "run_pipeline", no_pipeline)
+        result = oam_weekly.main(
+            self._argv(tmp_path, ["--uploaded-after", "2026-09-14", "--uploaded-before", "2026-09-07"])
+        )
+        assert result == 1
+
+    def test_valid_window_runs_pipeline_and_records_status(self, tmp_path, monkeypatch):
+        captured = {}
+
+        def fake_run_pipeline(repo_root, run_dir, uploaded_after, uploaded_before=None):
+            captured["after"] = uploaded_after
+            captured["before"] = uploaded_before
+
+        monkeypatch.setattr(oam_weekly, "run_pipeline", fake_run_pipeline)
+        monkeypatch.setattr(oam_weekly, "load_gate_candidates", lambda run_dir: pd.DataFrame())
+        monkeypatch.setattr(
+            oam_weekly,
+            "prepare_candidates",
+            lambda gate, ledger, run_dir, server_check: oam_weekly.Preparation(0, [], 0),
+        )
+        result = oam_weekly.main(
+            self._argv(tmp_path, ["--uploaded-after", "2026-09-01", "--uploaded-before", "2026-09-07"])
+        )
+        assert result == 0
+        assert captured == {"after": "2026-09-01", "before": "2026-09-07"}
+        status_text = (tmp_path / "last_run.txt").read_text(encoding="utf-8")
+        assert "uploaded_before: 2026-09-07" in status_text
+        assert "exit: success" in status_text
+
+
 class TestParseArgs:
     def test_env_var_used_as_default(self, monkeypatch):
         monkeypatch.setenv("OAM_UPLOADED_CSV", r"H:\some\ledger.csv")
@@ -513,3 +634,11 @@ class TestParseArgs:
     def test_uploaded_after_defaults_to_none(self):
         args = oam_weekly.parse_args(["--uploaded-csv", "ledger.csv"])
         assert args.uploaded_after is None
+
+    def test_uploaded_before_defaults_to_none(self):
+        args = oam_weekly.parse_args(["--uploaded-csv", "ledger.csv"])
+        assert args.uploaded_before is None
+
+    def test_uploaded_before_parses_when_given(self):
+        args = oam_weekly.parse_args(["--uploaded-csv", "ledger.csv", "--uploaded-before", "2026-09-07"])
+        assert args.uploaded_before == "2026-09-07"

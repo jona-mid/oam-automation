@@ -21,10 +21,11 @@ scrape -> filter -> phenology -> thumbnails -> tifs -> jpegs -> metadata
 
 ```
 python oam_weekly.py [--output-dir DIR] [--dry-run] [--skip-server-check]
-                     [--uploaded-after YYYY-MM-DD]
+                     [--uploaded-after YYYY-MM-DD] [--uploaded-before YYYY-MM-DD]
 ```
 
 - `--uploaded-after YYYY-MM-DD` restricts the run to OAM uploads on or after that date, so weekly runs process only new images instead of the full catalog (~8,800 filter-passing candidates). Resolution order: explicit flag, then `scrape_uploaded_at` in the last run's status file (the newest upload date the previous run's scrape saw, taken from the scrape CSV's `uploaded_at` column), then the last run's timestamp date, then fail fast. The first run must pass the flag explicitly.
+- `--uploaded-before YYYY-MM-DD` bounds ad-hoc windows from above: the run only processes OAM uploads between `--uploaded-after` and this date. The weekly default never sets it. The flag requires a resolvable `--uploaded-after` with a common period in between, otherwise the run aborts. Use a fresh `--output-dir` for each ad-hoc window; the pipeline skips stages whose outputs already exist, so reusing a dir would keep the previous window's results.
 - `--dry-run` lists gate candidates and exact upload kwargs with zero upload calls.
 - `--skip-server-check` skips check for identical `file_name`
 - Each run writes a status file (`last_run.txt` next to the run dirs) with timestamp, counts, and exit status.

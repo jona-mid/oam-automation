@@ -70,10 +70,17 @@ def format_en_date(value: date) -> str:
     return f"{value:%B} {value.day}, {value:%Y}"
 
 
-def run_pipeline(repo_root: Path, run_dir: Path, uploaded_after: Optional[str] = None) -> None:
+def run_pipeline(
+    repo_root: Path,
+    run_dir: Path,
+    uploaded_after: Optional[str] = None,
+    uploaded_before: Optional[str] = None,
+) -> None:
     command = [sys.executable, str(repo_root / "pipeline.py"), "--output-dir", str(run_dir)]
     if uploaded_after:
         command += ["--uploaded-after-date", uploaded_after]
+    if uploaded_before:
+        command += ["--uploaded-before-date", uploaded_before]
     print("+", " ".join(command))
     subprocess.run(command, cwd=repo_root, check=True)
 
@@ -177,14 +184,32 @@ def append_ledger_row(csv_path: Path, filename: str, kwargs: dict) -> None:
         )
 
 
-def write_status(path: Path, run_dir: Path, dry_run: bool, counts: RunCounts, exit_status: str, uploaded_after: Optional[str] = None, scrape_uploaded_at: Optional[str] = None) -> None:
+def write_status(
+    path: Path,
+    run_dir: Path,
+    dry_run: bool,
+    counts: RunCounts,
+    exit_status: str,
+    uploaded_after: Optional[str] = None,
+    scrape_uploaded_at: Optional[str] = None,
+    uploaded_before: Optional[str] = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Monotonic guard: an ad-hoc window run shares this file with the weekly
+    # chain; its older scrape date must never drag the weekly window backwards.
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("scrape_uploaded_at:"):
+                value = line.split(":", 1)[1].strip()
+                if value and (scrape_uploaded_at is None or value > scrape_uploaded_at):
+                    scrape_uploaded_at = value
     lines = [
         f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
         f"run_dir: {run_dir}",
         f"dry_run: {dry_run}",
         f"uploaded_after: {uploaded_after or ''}",
         f"scrape_uploaded_at: {scrape_uploaded_at or ''}",
+        f"uploaded_before: {uploaded_before or ''}",
         f"candidates: {counts.candidates}",
         f"uploaded: {counts.uploaded}",
         f"failed: {counts.failed}",
@@ -228,6 +253,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         help="Scrape only OAM uploads on/after this date (YYYY-MM-DD); "
         "default: the date of the last run's status file; first run requires it",
+    )
+    parser.add_argument(
+        "--uploaded-before",
+        default=None,
+        help="Scrape only OAM uploads on/before this date (YYYY-MM-DD); "
+        "ad-hoc windows only: requires --uploaded-after (or a resolvable date from the "
+        "status file) with a common period in between; the weekly default never sets it",
     )
     args = parser.parse_args(argv)
     if args.uploaded_csv is None:
@@ -353,6 +385,26 @@ def main(argv: Optional[List[str]] = None) -> int:
     counts = RunCounts()
     exit_status = "failed"
     try:
+        if args.uploaded_before:
+            if uploaded_after is None:
+                raise RuntimeError(
+                    "--uploaded-before requires an uploaded-after date "
+                    "(explicit --uploaded-after or a previous run's status file); "
+                    "the filter only applies date bounds when the after bound is present"
+                )
+            try:
+                after_date = date.fromisoformat(uploaded_after)
+                before_date = date.fromisoformat(args.uploaded_before)
+            except ValueError as error:
+                raise RuntimeError(
+                    f"--uploaded-after/--uploaded-before must be YYYY-MM-DD dates: {error}"
+                ) from error
+            if after_date >= before_date:
+                raise RuntimeError(
+                    f"--uploaded-before {args.uploaded_before} leaves no common period "
+                    f"with --uploaded-after {uploaded_after}"
+                )
+
         if args.dry_run and not (run_dir / "metadata" / "phenology_report.csv").exists():
             raise RuntimeError(
                 f"Dry run needs an existing run dir with pipeline outputs; none at {run_dir}"
@@ -365,7 +417,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "(no status file found to derive the last run date from); "
                     "this prevents an accidental full-catalog VLM audit"
                 )
-            run_pipeline(ROOT, run_dir, uploaded_after)
+            run_pipeline(ROOT, run_dir, uploaded_after, args.uploaded_before)
 
         gate = load_gate_candidates(run_dir)
         ledger = load_ledger_filenames(args.uploaded_csv)
@@ -406,7 +458,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         except Exception as error:
             print(f"  ! Could not derive scrape_uploaded_at ({error})")
             scrape_at = None
-        write_status(status_file, run_dir, args.dry_run, counts, exit_status, uploaded_after, scrape_at)
+        write_status(
+            status_file,
+            run_dir,
+            args.dry_run,
+            counts,
+            exit_status,
+            uploaded_after,
+            scrape_at,
+            args.uploaded_before,
+        )
 
     return 0 if exit_status in ("success", "dry-run") else 1
 
