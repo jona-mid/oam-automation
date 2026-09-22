@@ -25,7 +25,7 @@ cp .env.example .env   # fill in
 .venv/bin/python oam_weekly.py                               # every run after that
 ```
 
-The first run needs the date of the last harvest. After that, each run continues where the previous one stopped (`runs/last_run.txt`). To run it weekly, see [Deploy](#deploy).
+The first run needs the date of the last harvest. After that, each run continues where the previous one stopped (`runs/last_run.txt`). To run it weekly, see [Deploy example](#deploy-example).
 
 - Each run writes a `runs/<date>/` folder (prune old ones); progress and errors go to stdout/stderr.
 - A failed run exits 1.
@@ -48,7 +48,7 @@ scrape -> filter -> phenology -> thumbnails/TIFFs -> JPEGs -> VLM check -> uploa
 - **Earth Engine forest filter:** kept but off; the weekly run never enables it (see `pipeline.py --forest-min/--forest-max`).
 - **Tests:** `pip install pytest && python -m pytest` (no network or credentials needed).
 
-## Deploy
+## Deploy example
 
 `/etc/systemd/system/oam-weekly.service`:
 
