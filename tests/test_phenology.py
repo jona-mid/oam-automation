@@ -58,6 +58,25 @@ class TestClassifySeason:
         )
         assert result == "in_season"
 
+    def test_padding_wraps_below_year_start(self):
+        """Window 0-82 padded by 30 reaches back into December."""
+        assert classify_season(capture_doy=344, pheno_start=0, pheno_end=82, pad_days=30) == "in_season"
+        assert classify_season(capture_doy=330, pheno_start=0, pheno_end=82, pad_days=30) == "out_of_season"
+
+    def test_padding_wraps_past_year_end(self):
+        """Window 300-360 padded by 30 reaches into January."""
+        assert classify_season(capture_doy=10, pheno_start=300, pheno_end=360, pad_days=30) == "in_season"
+        assert classify_season(capture_doy=30, pheno_start=300, pheno_end=360, pad_days=30) == "out_of_season"
+
+    def test_padding_on_wrapping_window(self):
+        """A wrapping window stays wrapping after padding (100->80 is almost the whole year)."""
+        assert classify_season(capture_doy=90, pheno_start=100, pheno_end=80, pad_days=0) == "out_of_season"
+        assert classify_season(capture_doy=90, pheno_start=100, pheno_end=80, pad_days=30) == "in_season"
+        assert classify_season(capture_doy=150, pheno_start=300, pheno_end=50, pad_days=30) == "out_of_season"
+
+    def test_padding_covering_whole_year(self):
+        assert classify_season(capture_doy=200, pheno_start=20, pheno_end=320, pad_days=30) == "in_season"
+
     def test_none_capture_doy(self):
         """Test with None capture DOY returns unknown."""
         result = classify_season(capture_doy=None, pheno_start=100, pheno_end=200)

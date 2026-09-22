@@ -188,8 +188,18 @@ def classify_season(
     if capture_doy is None or pheno_start is None or pheno_end is None:
         return "unknown"
 
-    start = int(round(pheno_start)) - pad_days
-    end = int(round(pheno_end)) + pad_days
+    # DOYs are 0-based (Jan 1 = 0). Padding can push the window across the
+    # year boundary, so wrap both ends back into the year; a padded window
+    # spanning the whole year keeps every capture.
+    year_days = 365
+    start = int(round(pheno_start))
+    end = int(round(pheno_end))
+    span = end - start if start <= end else end + year_days - start
+    if span + 2 * pad_days >= year_days - 1:
+        return "in_season"
+    start = (start - pad_days) % year_days
+    end = (end + pad_days) % year_days
+    capture_doy = capture_doy % year_days
 
     if start <= end:
         in_season = start <= capture_doy <= end
