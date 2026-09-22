@@ -37,7 +37,7 @@ def main():
     parser.add_argument("--pad-days", type=int, default=30)
     parser.add_argument("--thumbnail-workers", type=int, default=8)
     parser.add_argument("--tif-workers", type=int, default=8)
-    parser.add_argument("--jpeg-workers", type=int, default=4)
+    parser.add_argument("--jpeg-workers", type=int, default=8)
     parser.add_argument("--vlm-endpoint", default="https://openrouter.ai/api/v1/chat/completions")
     parser.add_argument("--vlm-model", default="google/gemini-3-flash-preview")
     parser.add_argument("--vlm-workers", type=int, default=4)
