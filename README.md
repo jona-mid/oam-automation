@@ -1,51 +1,48 @@
 # oam-automation
 
-Patched copy of `openaerialmap_scraper_clean` for automated OAM fetching, phenology classification, and upload to deadtrees.earth.
+Weekly OpenAerialMap (OAM) harvest for deadtrees.earth: fetch new imagery, filter it, classify season with MODIS phenology, review tree-canopy state with a VLM, and upload the qualifying images as new datasets. Runs as a single command per week (`oam_weekly.py`), currently driven manually, designed for a systemd timer.
 
-**This repo is canonical** for the automation effort. Upstream fixes are not synced automatically; make all changes here.
+Status: running. Validated over two trial weeks (37 + 25 window candidates, uploads deduplicated against the platform). 27 datasets uploaded so far.
 
-## Patches applied (WP-01)
-
-1. **v3 MODIS zarr**: Replaces buggy v2 (any-NaN interpolation) with corrected v3 (all-NaN interpolation).
-2. **DOY off-by-one fix**: `parse_date_to_doy` returns `tm_yday - 1` (0-indexed) to match MODIS DOY convention (0-365).
-3. **Phenology path fix**: Pipeline no longer overrides the default path, preventing path divergence.
-
-## VLM audit integration (WP-01b)
-
-The pipeline now runs a blind tree-canopy VLM review after the metadata stages:
+## How it works
 
 ```
 scrape -> filter -> phenology -> thumbnails -> tifs -> jpegs -> metadata
-                                                             -> audit_manifest -> phenology-run -> phenology-report
+       -> VLM audit (manifest -> phenology-run -> phenology-report)
+       -> upload gate -> ledger/platform diff -> upload -> ledger append -> status file
 ```
 
-- Tool: `aerial_phenology_audit.py` (copied from `aerial-phenology-audit/`, unmodified).
-- Model: `google/gemini-3-flash-preview` via OpenRouter (~$0.0008/image, 2-6s/image).
-- Requires env var `OPENROUTER_API_KEY`. Missing key fails closed (the upload gate cannot be verified without it). Current key location on this machine: `C:\Users\jonathan\Documents\HiWi\georeferencing\georef_check_vlm\.env`. WP-03 must give the key a proper home on the scheduler host (systemd `EnvironmentFile=`).
-- `--vlm-endpoint` must be the FULL chat completions URL (`https://openrouter.ai/api/v1/chat/completions`); the tool posts to it as-is.
-- Only `in_season` images are reviewed (`--priorities in_season`); out-of-season images never reach upload.
-- `phenology.py` derives `filename`, `classification`, and `jpeg_filename` columns so the manifest reads `phenology.csv` directly (no adapter).
-- `phenology-run` is resumable: re-runs skip images with recorded successes ($0 re-run cost).
-- Upload gate: MODIS `in_season` AND VLM `leaf_on` AND `review_status == success`.
+- `pipeline.py` is the resumable pipeline: each stage is skipped if its output already exists, so an interrupted run continues where it stopped.
+- The upload gate keeps only images with MODIS `in_season`, VLM `leaf_on`, and `review_status == success`.
+- `deadtrees_seam.py` is the thin platform seam: it uploads via the monorepo `deadtrees-cli` with fresh credentials per file and runs the platform-side `file_name` duplicate check.
+- Upload kwargs follow the canonical ledger schema. License provenance comes from the OAM record (`property_license` mapped through `OAM_LICENSE_MAP` in `deadtrees_seam.py`), not from a hardcoded default. Unknown licenses fail closed.
 
-## Weekly wrapper (WP-02)
+## Usage
 
-`oam_weekly.py` runs the pipeline, applies the upload gate, diffs against the ledger and the platform, uploads via the monorepo `deadtrees-cli` (`deadtrees_seam.py` is the thin platform seam), appends successes to the ledger CSV, and writes a status file. Machine-specific configuration lives in the gitignored `.env`:
+`oam_weekly.py` is the entry point:
 
-- `OPENROUTER_API_KEY` - injected into the pipeline subprocess env
-- `PROCESSOR_USERNAME` / `PROCESSOR_PASSWORD` - deadtrees.earth account
-- `SUPABASE_URL` / `SUPABASE_KEY` / `API_ENDPOINT` - platform endpoints
-- `OAM_UPLOADED_CSV` - canonical upload ledger path (default for `--uploaded-csv`; required unless the flag is given)
+```
+python oam_weekly.py [--output-dir DIR] [--dry-run] [--skip-server-check]
+                     [--uploaded-after YYYY-MM-DD]
+```
 
-`--dry-run` lists candidates and upload kwargs without uploading; `--skip-server-check` skips the platform-side duplicate check. `--uploaded-after YYYY-MM-DD` scrapes only uploads on/after that date; it defaults to the date of the last run's status file and the first run must pass it explicitly, so no run silently audits the full catalog.
+- `--uploaded-after YYYY-MM-DD` restricts the run to OAM uploads on or after that date, so weekly runs process only new images instead of the full catalog (~8,800 filter-passing candidates). Resolution order: explicit flag, then the date in the last run's status file, then fail fast. The first run must pass the flag explicitly.
+- `--dry-run` lists gate candidates and exact upload kwargs with zero upload calls.
+- `--skip-server-check` skips the platform-side duplicate check (diff leg 2).
+- Each run writes a status file (`last_run.txt` next to the run dirs) with timestamp, counts, and exit status.
 
-The Earth Engine forest-percentage filter (ESA WorldCover, `forest > 0`) is opt-in: `pipeline.py --forest-min 0 --forest-max 100` re-enables it. Without those bounds no Earth Engine call happens at all, and when enabled, an EE error rate above 10% aborts the filter stage instead of silently dropping records (errors used to be mapped to 0%, which once reduced 8,812 candidates to 36).
+## Reliability
 
-## Upstream sources
+- **Dedup:** two legs, the local ledger CSV (`metadata_uploaded.csv`, canonical schema) and a server-side `file_name` check on the platform. A filename known to either is skipped.
+- **Retry:** failed uploads are logged per candidate and never appended to the ledger, so the next run retries them naturally.
+- **Crash recovery:** if a run dies after an upload succeeded but before its ledger append, reconcile by cross-checking platform datasets against the ledger and appending the missing row with `build_upload_kwargs` + `append_ledger_row` (exercised in practice, Sep 22, 2026).
 
-Two upstreams, both frozen (not synced):
+## Notes
 
-- `C:\Users\jonathan\Documents\HiWi\openaerialmap_scraper_clean` - scraper, pipeline, phenology base. Untouched; its vision files are intentionally excluded here.
-- `C:\Users\jonathan\Documents\HiWi\aerial-phenology-audit` - source of `aerial_phenology_audit.py` (copied verbatim, unmodified).
+- **Earth Engine forest filter:** the ESA WorldCover forest-percentage filter (`forest > 0`) is included but not used by default. The VLM check covers the same concern (tree-canopy presence), and Earth Engine can cause cost. It can be re-enabled with `pipeline.py --forest-min 0 --forest-max 100`; without bounds no EE call happens, and an EE error rate above 10% aborts loudly instead of silently dropping records.
+- **VLM audit:** `aerial_phenology_audit.py` (copied verbatim from `aerial-phenology-audit`), model `google/gemini-3-flash-preview` via OpenRouter, ~$0.0008/image, only `in_season` images are reviewed. `OPENROUTER_API_KEY` required; missing key fails closed. `phenology-run` is resumable at zero cost.
+- Configuration lives in the gitignored `.env` (OpenRouter key, platform account, endpoints, ledger path). It is not part of this repo.
 
-All changes live in this repo.
+## Tests
+
+`python -m pytest tests/` - 186 tests, all green.
