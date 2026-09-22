@@ -545,7 +545,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         prep = prepare_candidates(gate, ledger, run_dir, server_check=not args.skip_server_check)
         counts.candidates = prep.candidates
         counts.rejected = prep.rejected
-        print(f"Gate passed {len(gate)} images; {prep.candidates} not in the ledger.")
+        print(f"Gate passed {len(gate)} images; {prep.candidates} left after dedup (ledger, platform file_name, content hash).")
 
         if args.dry_run:
             print(f"Dry run: {len(prep.specs)} would-be uploads, zero upload calls.")
