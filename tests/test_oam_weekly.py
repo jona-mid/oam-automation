@@ -1,6 +1,7 @@
 """Tests for oam_weekly pure logic: gate, diff, kwargs building, ledger append, status, config."""
 
 import csv
+import json
 from datetime import date
 from pathlib import Path
 
@@ -411,20 +412,6 @@ class TestWriteStatus:
         oam_weekly.write_status(status, tmp_path / "run", True, counts, "dry-run")
         assert "uploaded_before: " in status.read_text(encoding="utf-8")
 
-    def test_scrape_uploaded_at_never_regresses(self, tmp_path):
-        status = tmp_path / "last_run.txt"
-        counts = oam_weekly.RunCounts()
-        # A weekly run sees data up to Sep 20; a later ad-hoc run of an old
-        # window sees only up to Sep 6 and must not drag the chain backwards.
-        oam_weekly.write_status(status, tmp_path / "run", False, counts, "success", None, "2026-09-20")
-        oam_weekly.write_status(status, tmp_path / "run", True, counts, "dry-run", None, "2026-09-06")
-        oam_weekly.write_status(status, tmp_path / "run", True, counts, "dry-run", None, None)
-        text = status.read_text(encoding="utf-8")
-        assert "scrape_uploaded_at: 2026-09-20" in text
-        # A genuinely newer scrape still advances the chain.
-        oam_weekly.write_status(status, tmp_path / "run", False, counts, "success", None, "2026-09-27")
-        assert "scrape_uploaded_at: 2026-09-27" in status.read_text(encoding="utf-8")
-
 
 class TestResolveUploadedAfter:
     def test_explicit_flag_wins(self, tmp_path):
@@ -474,6 +461,84 @@ class TestScrapeUploadedAt:
             [["1", "not-a-date"], ["2", ""]],
         )
         assert oam_weekly.scrape_uploaded_at(run_dir) is None
+
+    def test_future_dated_upload_clamped_to_today(self, tmp_path):
+        run_dir = tmp_path / "run"
+        (run_dir / "metadata").mkdir(parents=True)
+        _write_csv(
+            run_dir / "metadata" / "filtered.csv",
+            ["uuid", "uploaded_at"],
+            [["1", "2031-05-01T00:00:00+00:00"]],
+        )
+        today = oam_weekly.datetime.now(oam_weekly.timezone.utc).date().isoformat()
+        assert oam_weekly.scrape_uploaded_at(run_dir) == today
+
+
+class TestAdvanceScrapeUploadedAt:
+    def test_older_scrape_does_not_regress(self):
+        value, warning = oam_weekly.advance_scrape_uploaded_at(
+            "2026-09-20", "2026-09-06", "2026-09-06"
+        )
+        assert value == "2026-09-20"
+        assert warning is None
+
+    def test_missing_scrape_preserves_chain(self):
+        value, warning = oam_weekly.advance_scrape_uploaded_at("2026-09-20", None, "2026-09-20")
+        assert value == "2026-09-20"
+        assert warning is None
+
+    def test_newer_scrape_advances_chain(self):
+        value, warning = oam_weekly.advance_scrape_uploaded_at(
+            "2026-09-13", "2026-09-20", "2026-09-13"
+        )
+        assert value == "2026-09-20"
+        assert warning is None
+
+    def test_first_run_adopts_clamped_scrape_value(self):
+        value, warning = oam_weekly.advance_scrape_uploaded_at(None, "2026-09-13", "2026-09-06")
+        assert value == "2026-09-13"
+        future = oam_weekly.advance_scrape_uploaded_at(None, "2031-05-01", "2026-09-06")
+        assert future[0] == oam_weekly.datetime.now(oam_weekly.timezone.utc).date().isoformat()
+
+    def test_uncovered_window_keeps_chain_and_warns(self):
+        value, warning = oam_weekly.advance_scrape_uploaded_at(
+            "2026-09-06", "2026-09-19", "2026-09-12"
+        )
+        assert value == "2026-09-06"
+        assert warning is not None
+        assert "2026-09-12" in warning
+        assert "2026-09-06" in warning
+
+    def test_covered_window_advances_even_from_older_after(self):
+        value, warning = oam_weekly.advance_scrape_uploaded_at(
+            "2026-09-06", "2026-09-19", "2026-09-01"
+        )
+        assert value == "2026-09-19"
+        assert warning is None
+
+    def test_future_stored_value_clamped(self):
+        value, warning = oam_weekly.advance_scrape_uploaded_at("2031-05-01", "2026-09-06", "2026-09-06")
+        assert value == oam_weekly.datetime.now(oam_weekly.timezone.utc).date().isoformat()
+
+    def test_unparseable_stored_treated_as_first_run(self):
+        value, warning = oam_weekly.advance_scrape_uploaded_at("garbage", "2026-09-13", None)
+        assert value == "2026-09-13"
+        assert warning is None
+
+
+class TestReadScrapeUploadedAt:
+    def test_reads_stored_value(self, tmp_path):
+        status = tmp_path / "last_run.txt"
+        status.write_text(
+            "timestamp: 2026-09-06T10:00:00\nscrape_uploaded_at: 2026-09-13\n", encoding="utf-8"
+        )
+        assert oam_weekly.read_scrape_uploaded_at(status) == "2026-09-13"
+
+    def test_missing_or_unparseable_yields_none(self, tmp_path):
+        assert oam_weekly.read_scrape_uploaded_at(tmp_path / "no.txt") is None
+        status = tmp_path / "last_run.txt"
+        status.write_text("scrape_uploaded_at: garbage\n", encoding="utf-8")
+        assert oam_weekly.read_scrape_uploaded_at(status) is None
 
 
 class TestRunPipelineCommand:
@@ -573,23 +638,153 @@ class TestMainUploadedBeforeGuard:
 
     def test_before_leaving_no_common_period_fails(self, tmp_path, monkeypatch):
         def no_pipeline(*args, **kwargs):
-            raise AssertionError("pipeline must not run when the window is empty")
-
-        monkeypatch.setattr(oam_weekly, "run_pipeline", no_pipeline)
-        result = oam_weekly.main(
-            self._argv(tmp_path, ["--uploaded-after", "2026-09-07", "--uploaded-before", "2026-09-07"])
-        )
-        assert result == 1
-
-    def test_before_without_after_at_all_fails(self, tmp_path, monkeypatch):
-        def no_pipeline(*args, **kwargs):
-            raise AssertionError("pipeline must not run for an empty window")
+            raise AssertionError("pipeline must not run when the window is inverted")
 
         monkeypatch.setattr(oam_weekly, "run_pipeline", no_pipeline)
         result = oam_weekly.main(
             self._argv(tmp_path, ["--uploaded-after", "2026-09-14", "--uploaded-before", "2026-09-07"])
         )
         assert result == 1
+
+    def test_valid_single_day_window_runs_pipeline(self, tmp_path, monkeypatch):
+        captured = {}
+
+        def fake_run_pipeline(repo_root, run_dir, uploaded_after, uploaded_before=None):
+            captured["after"] = uploaded_after
+            captured["before"] = uploaded_before
+
+        monkeypatch.setattr(oam_weekly, "run_pipeline", fake_run_pipeline)
+        monkeypatch.setattr(oam_weekly, "load_gate_candidates", lambda run_dir: pd.DataFrame())
+        monkeypatch.setattr(
+            oam_weekly,
+            "prepare_candidates",
+            lambda gate, ledger, run_dir, server_check: oam_weekly.Preparation(0, [], 0),
+        )
+        result = oam_weekly.main(
+            self._argv(tmp_path, ["--uploaded-after", "2026-09-07", "--uploaded-before", "2026-09-07"])
+        )
+        assert result == 0
+        assert captured == {"after": "2026-09-07", "before": "2026-09-07"}
+
+    def test_adhoc_window_ahead_of_chain_keeps_chain_and_warns(self, tmp_path, monkeypatch, capsys):
+        run_dir = tmp_path / "run"
+        (run_dir / "metadata").mkdir(parents=True)
+        _write_csv(
+            run_dir / "metadata" / "filtered.csv",
+            ["uuid", "uploaded_at"],
+            [["1", "2026-09-19T10:00:00+00:00"]],
+        )
+        status = tmp_path / "last_run.txt"
+        status.write_text(
+            "timestamp: 2026-09-06T10:00:00\nscrape_uploaded_at: 2026-09-06\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(oam_weekly, "run_pipeline", lambda *a, **k: None)
+        monkeypatch.setattr(oam_weekly, "load_gate_candidates", lambda run_dir: pd.DataFrame())
+        monkeypatch.setattr(
+            oam_weekly,
+            "prepare_candidates",
+            lambda gate, ledger, run_dir, server_check: oam_weekly.Preparation(0, [], 0),
+        )
+        result = oam_weekly.main(
+            self._argv(tmp_path, ["--uploaded-after", "2026-09-12", "--uploaded-before", "2026-09-20"])
+        )
+        assert result == 0
+        assert "scrape_uploaded_at: 2026-09-06" in status.read_text(encoding="utf-8")
+        assert "were not covered" in capsys.readouterr().out
+
+    def test_dry_run_does_not_advance_chain(self, tmp_path, monkeypatch):
+        run_dir = tmp_path / "run"
+        (run_dir / "metadata").mkdir(parents=True)
+        _write_csv(
+            run_dir / "metadata" / "filtered.csv",
+            ["uuid", "uploaded_at"],
+            [["1", "2026-09-19T10:00:00+00:00"]],
+        )
+        (run_dir / "metadata" / "phenology_report.csv").write_text("filename\n", encoding="utf-8")
+        status = tmp_path / "last_run.txt"
+        status.write_text(
+            "timestamp: 2026-09-06T10:00:00\nscrape_uploaded_at: 2026-09-06\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(oam_weekly, "load_gate_candidates", lambda run_dir: pd.DataFrame())
+        monkeypatch.setattr(
+            oam_weekly,
+            "prepare_candidates",
+            lambda gate, ledger, run_dir, server_check: oam_weekly.Preparation(0, [], 0),
+        )
+        result = oam_weekly.main(self._argv(tmp_path, ["--dry-run", "--uploaded-after", "2026-09-12"]))
+        assert result == 0
+        assert "scrape_uploaded_at: 2026-09-06" in status.read_text(encoding="utf-8")
+
+    def test_reused_window_dir_with_different_window_aborts(self, tmp_path, monkeypatch):
+        run_dir = tmp_path / "run"
+        (run_dir / "metadata").mkdir(parents=True)
+        (run_dir / "metadata" / "filtered.csv").write_text("uuid\n", encoding="utf-8")
+        manifest = {
+            "config": {
+                "uploaded_after_date": "2026-09-01",
+                "uploaded_before_date": "2026-09-07",
+            }
+        }
+        (run_dir / "run_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        def no_pipeline(*args, **kwargs):
+            raise AssertionError("pipeline must not run into a dir holding another window")
+
+        monkeypatch.setattr(oam_weekly, "run_pipeline", no_pipeline)
+        result = oam_weekly.main(
+            self._argv(tmp_path, ["--uploaded-after", "2026-09-08", "--uploaded-before", "2026-09-14"])
+        )
+        assert result == 1
+
+    def test_matching_window_dir_resumes(self, tmp_path, monkeypatch):
+        run_dir = tmp_path / "run"
+        (run_dir / "metadata").mkdir(parents=True)
+        (run_dir / "metadata" / "filtered.csv").write_text("uuid\n", encoding="utf-8")
+        manifest = {
+            "config": {
+                "uploaded_after_date": "2026-09-06",
+                "uploaded_before_date": "None",
+            }
+        }
+        (run_dir / "run_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        captured = {}
+
+        def fake_run_pipeline(repo_root, run_dir, uploaded_after, uploaded_before=None):
+            captured["after"] = uploaded_after
+            captured["before"] = uploaded_before
+
+        monkeypatch.setattr(oam_weekly, "run_pipeline", fake_run_pipeline)
+        monkeypatch.setattr(oam_weekly, "load_gate_candidates", lambda run_dir: pd.DataFrame())
+        monkeypatch.setattr(
+            oam_weekly,
+            "prepare_candidates",
+            lambda gate, ledger, run_dir, server_check: oam_weekly.Preparation(0, [], 0),
+        )
+        result = oam_weekly.main(self._argv(tmp_path, ["--uploaded-after", "2026-09-06"]))
+        assert result == 0
+        assert captured == {"after": "2026-09-06", "before": None}
+
+    def test_weekly_default_main_passes_no_before_bound(self, tmp_path, monkeypatch):
+        status = tmp_path / "last_run.txt"
+        status.write_text(
+            "timestamp: 2026-09-06T10:00:00\nscrape_uploaded_at: 2026-09-13\n", encoding="utf-8"
+        )
+        captured = {}
+
+        def fake_run_pipeline(repo_root, run_dir, uploaded_after, uploaded_before=None):
+            captured["after"] = uploaded_after
+            captured["before"] = uploaded_before
+
+        monkeypatch.setattr(oam_weekly, "run_pipeline", fake_run_pipeline)
+        monkeypatch.setattr(oam_weekly, "load_gate_candidates", lambda run_dir: pd.DataFrame())
+        monkeypatch.setattr(
+            oam_weekly,
+            "prepare_candidates",
+            lambda gate, ledger, run_dir, server_check: oam_weekly.Preparation(0, [], 0),
+        )
+        result = oam_weekly.main(self._argv(tmp_path, []))
+        assert result == 0
+        assert captured == {"after": "2026-09-13", "before": None}
 
     def test_valid_window_runs_pipeline_and_records_status(self, tmp_path, monkeypatch):
         captured = {}

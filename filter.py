@@ -75,7 +75,7 @@ def filter_openaerial_data(
         max_gsd_cm (float): Maximum allowed Ground Sample Distance (GSD) in centimeters.
                             Images with GSD smaller than this value are kept.
         uploaded_after_date (str, optional): Filters for images uploaded to OpenAerialMap on or after this date (format 'YYYY-MM-DD').
-        uploaded_before_date (str, optional): Filters for images uploaded to OpenAerialMap on or before this date (format 'YYYY-MM-DD').
+        uploaded_before_date (str, optional): Filters for images uploaded to OpenAerialMap on or before this date (format 'YYYY-MM-DD'; the whole day is included).
         platform_type (str or list): Platform type(s) to filter (e.g., 'uav' or ['uav', 'aircraft']). Case-insensitive.
         forest_percentage_min (float, optional): Minimum forest percentage (exclusive, > min). If None, no lower bound.
         forest_percentage_max (float, optional): Maximum forest percentage (inclusive, <= max). If None, no upper bound.
@@ -122,7 +122,7 @@ def filter_openaerial_data(
     else:
         print("  - Warning: 'property_bands' column not found. Skipping.")
 
-    # 2. Filter by uploaded_at date (>= uploaded_after_date and <= uploaded_before_date if provided)
+    # 2. Filter by uploaded_at date (>= uploaded_after_date and <= end of uploaded_before_date if provided)
     # Assuming 'uploaded_at' exists as a string timestamp.
     if "uploaded_at" in filtered_df.columns and uploaded_after_date is not None:
         original_count = len(filtered_df)
@@ -137,11 +137,12 @@ def filter_openaerial_data(
             filtered_df["uploaded_datetime"] >= target_date
         )
 
-        # Upper bound filter (if provided)
+        # Upper bound filter (if provided); the whole before day is included
+        # (midnight-exclusive cutoff would silently drop the before date's uploads).
         if uploaded_before_date:
-            upper_date = pd.to_datetime(uploaded_before_date, utc=True)
-            date_filter = date_filter & (filtered_df["uploaded_datetime"] <= upper_date)
-            date_range_str = f">= {uploaded_after_date} and <= {uploaded_before_date}"
+            upper_date = pd.to_datetime(uploaded_before_date, utc=True) + pd.Timedelta(days=1)
+            date_filter = date_filter & (filtered_df["uploaded_datetime"] < upper_date)
+            date_range_str = f">= {uploaded_after_date} and <= end of {uploaded_before_date}"
         else:
             date_range_str = f">= {uploaded_after_date}"
 

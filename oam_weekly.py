@@ -11,11 +11,12 @@ gitignored `.env`; see OAM_UPLOADED_CSV below.
 
 import argparse
 import csv
+import json
 import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, List, NamedTuple, Optional, Set
 
@@ -107,7 +108,11 @@ def load_ledger_filenames(csv_path: Path) -> Set[str]:
 
 
 def scrape_uploaded_at(run_dir: Path) -> Optional[str]:
-    """Newest OAM upload date this run's scrape saw (uploaded_at column of the scrape CSV)."""
+    """Newest OAM upload date this run's scrape saw (uploaded_at column of the scrape CSV).
+
+    Clamped to today's UTC date: one junk future-dated uploaded_at row must not
+    poison the weekly chain.
+    """
     csv_path = run_dir / "metadata" / "filtered.csv"
     if not csv_path.exists():
         return None
@@ -115,7 +120,73 @@ def scrape_uploaded_at(run_dir: Path) -> Optional[str]:
     parsed = pd.to_datetime(df["uploaded_at"], errors="coerce", utc=True)
     if not parsed.notna().any():
         return None
-    return parsed.max().strftime("%Y-%m-%d")
+    newest = min(parsed.max(), pd.Timestamp(datetime.now(timezone.utc)))
+    return newest.strftime("%Y-%m-%d")
+
+
+def read_scrape_uploaded_at(status_file: Path) -> Optional[str]:
+    """Stored weekly-chain value from the status file; None if missing or not a plain date."""
+    if not status_file.exists():
+        return None
+    for line in status_file.read_text(encoding="utf-8").splitlines():
+        if line.startswith("scrape_uploaded_at:"):
+            value = line.split(":", 1)[1].strip()
+            if not value:
+                return None
+            try:
+                date.fromisoformat(value)
+            except ValueError:
+                return None
+            return value
+    return None
+
+
+def advance_scrape_uploaded_at(
+    stored: Optional[str],
+    scrape_at: Optional[str],
+    uploaded_after: Optional[str],
+) -> tuple:
+    """Decide the weekly chain's next value from this run's outcome.
+
+    The chain only advances when this run's window covered the chain point
+    (uploaded_after <= stored); an ad-hoc window starting ahead of the chain
+    would otherwise let every upload in the uncovered gap fall below all
+    future bounds. Both values are clamped to today's UTC date so a junk
+    future date can never enter the chain. Dry runs must not call this; they
+    keep the stored value untouched.
+    """
+    today = datetime.now(timezone.utc).date()
+
+    def clamp(value: Optional[str]) -> Optional[date]:
+        if not value:
+            return None
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError:
+            return None
+        return min(parsed, today)
+
+    stored_date = clamp(stored)
+    scrape_date = clamp(scrape_at)
+    if stored_date is None:
+        return (scrape_date.isoformat() if scrape_date else None), None
+    if scrape_date is None:
+        return stored_date.isoformat(), None
+    window_after = None
+    if uploaded_after:
+        try:
+            window_after = date.fromisoformat(uploaded_after)
+        except ValueError:
+            window_after = None
+    if window_after is not None and window_after > stored_date:
+        warning = (
+            f"this run's window starts {window_after.isoformat()}, after the chain point "
+            f"{stored_date.isoformat()}; uploads in [{stored_date.isoformat()}, "
+            f"{window_after.isoformat()}) were not covered; keeping the chain at "
+            f"{stored_date.isoformat()} (re-run with --uploaded-after {stored_date.isoformat()} to cover the gap)"
+        )
+        return stored_date.isoformat(), warning
+    return max(stored_date, scrape_date).isoformat(), None
 
 
 def build_upload_kwargs(row: pd.Series, run_date: date) -> dict:
@@ -195,14 +266,9 @@ def write_status(
     uploaded_before: Optional[str] = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Monotonic guard: an ad-hoc window run shares this file with the weekly
-    # chain; its older scrape date must never drag the weekly window backwards.
-    if path.exists():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.startswith("scrape_uploaded_at:"):
-                value = line.split(":", 1)[1].strip()
-                if value and (scrape_uploaded_at is None or value > scrape_uploaded_at):
-                    scrape_uploaded_at = value
+    # scrape_uploaded_at is the final chain value decided by main() via
+    # advance_scrape_uploaded_at (or the stored value for dry runs); this
+    # writer records it as given.
     lines = [
         f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
         f"run_dir: {run_dir}",
@@ -257,7 +323,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--uploaded-before",
         default=None,
-        help="Scrape only OAM uploads on/before this date (YYYY-MM-DD); "
+        help="Scrape only OAM uploads up to and including this date (YYYY-MM-DD; "
+        "the whole before day is included); "
         "ad-hoc windows only: requires --uploaded-after (or a resolvable date from the "
         "status file) with a common period in between; the weekly default never sets it",
     )
@@ -381,9 +448,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     run_dir = (args.output_dir or ROOT / "runs" / datetime.now().strftime("%Y-%m-%d")).resolve()
     status_file = (args.status_file or run_dir.parent / "last_run.txt").resolve()
     uploaded_after = resolve_uploaded_after(args.uploaded_after, status_file)
+    stored_scrape = read_scrape_uploaded_at(status_file)
 
     counts = RunCounts()
     exit_status = "failed"
+    chain_value = stored_scrape
     try:
         if args.uploaded_before:
             if uploaded_after is None:
@@ -399,7 +468,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 raise RuntimeError(
                     f"--uploaded-after/--uploaded-before must be YYYY-MM-DD dates: {error}"
                 ) from error
-            if after_date >= before_date:
+            if after_date > before_date:
                 raise RuntimeError(
                     f"--uploaded-before {args.uploaded_before} leaves no common period "
                     f"with --uploaded-after {uploaded_after}"
@@ -417,6 +486,31 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "(no status file found to derive the last run date from); "
                     "this prevents an accidental full-catalog VLM audit"
                 )
+            # A reused run dir silently keeps the previous window's scrape
+            # outputs (the pipeline skips existing stages) while the status
+            # file would record this run's window. Abort on mismatch.
+            filtered_csv = run_dir / "metadata" / "filtered.csv"
+            manifest_path = run_dir / "run_manifest.json"
+            if filtered_csv.exists() and manifest_path.exists():
+                try:
+                    config = json.loads(manifest_path.read_text(encoding="utf-8"))["config"]
+                    recorded = (config.get("uploaded_after_date"), config.get("uploaded_before_date"))
+                except (OSError, ValueError, KeyError, TypeError):
+                    recorded = None
+                if recorded is not None:
+                    # The pipeline writes manifest config values with str(); normalize both sides.
+                    def window_text(value):
+                        return "None" if value is None else str(value)
+
+                    recorded_window = tuple(window_text(value) for value in recorded)
+                    requested_window = (window_text(uploaded_after), window_text(args.uploaded_before))
+                    if recorded_window != requested_window:
+                        raise RuntimeError(
+                            f"{run_dir} already holds a different window "
+                            f"(recorded after={recorded[0]!r}, before={recorded[1]!r}; "
+                            f"requested after={uploaded_after!r}, before={args.uploaded_before!r}); "
+                            "use a fresh --output-dir for each ad-hoc window"
+                        )
             run_pipeline(ROOT, run_dir, uploaded_after, args.uploaded_before)
 
         gate = load_gate_candidates(run_dir)
@@ -448,6 +542,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"Summary: {counts.candidates} candidates, "
                 f"{counts.uploaded} uploaded, {counts.failed} failed."
             )
+            if counts.failed:
+                print(
+                    f"  ! {counts.failed} upload(s) failed and are NOT covered by the next "
+                    f"auto window; to retry, re-run with --uploaded-after {uploaded_after}"
+                )
             exit_status = "success" if counts.failed == 0 else "failed"
     except Exception as error:
         print(f"Run aborted: {error}")
@@ -458,6 +557,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         except Exception as error:
             print(f"  ! Could not derive scrape_uploaded_at ({error})")
             scrape_at = None
+        # Dry runs never upload, so they must never advance the weekly chain
+        # (a reused/pipeline-built dir could otherwise push it past data that
+        # was never uploaded). Upload runs advance only when their window
+        # covered the chain point.
+        if args.dry_run:
+            chain_value = stored_scrape
+        else:
+            chain_value, chain_warning = advance_scrape_uploaded_at(
+                stored_scrape, scrape_at, uploaded_after
+            )
+            if chain_warning:
+                print(f"  ! {chain_warning}")
         write_status(
             status_file,
             run_dir,
@@ -465,7 +576,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             counts,
             exit_status,
             uploaded_after,
-            scrape_at,
+            chain_value,
             args.uploaded_before,
         )
 

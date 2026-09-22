@@ -76,6 +76,42 @@ class TestFilterOpendata:
 
         assert len(result) == 2
 
+    def test_filter_by_uploaded_before_date_includes_whole_day(self):
+        """The before bound includes the whole named day, not just its midnight."""
+        df = pd.DataFrame(
+            [
+                {
+                    "id": "1",
+                    "gsd": "0.05",
+                    "platform": "uav",
+                    "uploaded_at": "2025-01-10T00:00:00Z",
+                },
+                {
+                    "id": "2",
+                    "gsd": "0.05",
+                    "platform": "uav",
+                    "uploaded_at": "2025-01-15T14:22:00Z",
+                },
+                {
+                    "id": "3",
+                    "gsd": "0.05",
+                    "platform": "uav",
+                    "uploaded_at": "2025-01-16T00:00:00Z",
+                },
+            ]
+        )
+
+        result = filter_openaerial_data(
+            df,
+            max_gsd_cm=100,
+            uploaded_after_date="2025-01-10",
+            uploaded_before_date="2025-01-15",
+        )
+
+        # Jan 10 00:00 included (inclusive lower bound), Jan 15 14:22 included
+        # (the whole before day), Jan 16 excluded.
+        assert list(result["id"]) == ["1", "2"]
+
     def test_filter_by_platform(self):
         """Test platform filtering."""
         df = pd.DataFrame(
