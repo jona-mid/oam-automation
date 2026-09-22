@@ -391,9 +391,10 @@ class TestWriteStatus:
     def test_status_file_records_uploaded_after(self, tmp_path):
         status = tmp_path / "last_run.txt"
         counts = oam_weekly.RunCounts()
-        oam_weekly.write_status(status, tmp_path / "run", True, counts, "dry-run", "2026-09-21")
+        oam_weekly.write_status(status, tmp_path / "run", True, counts, "dry-run", "2026-09-21", "2026-09-13")
         text = status.read_text(encoding="utf-8")
         assert "uploaded_after: 2026-09-21" in text
+        assert "scrape_uploaded_at: 2026-09-13" in text
 
 
 class TestResolveUploadedAfter:
@@ -402,13 +403,48 @@ class TestResolveUploadedAfter:
         status.write_text("timestamp: 2026-08-01T10:00:00\n", encoding="utf-8")
         assert oam_weekly.resolve_uploaded_after("2026-09-01", status) == "2026-09-01"
 
-    def test_derives_date_from_status_file(self, tmp_path):
+    def test_derives_from_scrape_uploaded_at(self, tmp_path):
         status = tmp_path / "last_run.txt"
-        status.write_text("timestamp: 2026-08-01T10:00:00\nexit: success\n", encoding="utf-8")
+        status.write_text(
+            "timestamp: 2026-08-01T10:00:00\nscrape_uploaded_at: 2026-09-13\n",
+            encoding="utf-8",
+        )
+        assert oam_weekly.resolve_uploaded_after(None, status) == "2026-09-13"
+
+    def test_falls_back_to_timestamp_without_scrape_uploaded_at(self, tmp_path):
+        status = tmp_path / "last_run.txt"
+        status.write_text(
+            "timestamp: 2026-08-01T10:00:00\nscrape_uploaded_at: \n", encoding="utf-8"
+        )
         assert oam_weekly.resolve_uploaded_after(None, status) == "2026-08-01"
 
     def test_missing_status_file_yields_none(self, tmp_path):
         assert oam_weekly.resolve_uploaded_after(None, tmp_path / "missing.txt") is None
+
+
+class TestScrapeUploadedAt:
+    def test_computed_from_filtered_csv(self, tmp_path):
+        run_dir = tmp_path / "run"
+        (run_dir / "metadata").mkdir(parents=True)
+        _write_csv(
+            run_dir / "metadata" / "filtered.csv",
+            ["uuid", "uploaded_at"],
+            [["1", "2026-09-06T13:39:47.930000+00:00"], ["2", "2026-09-13T21:34:19.226000+00:00"]],
+        )
+        assert oam_weekly.scrape_uploaded_at(run_dir) == "2026-09-13"
+
+    def test_missing_csv_yields_none(self, tmp_path):
+        assert oam_weekly.scrape_uploaded_at(tmp_path) is None
+
+    def test_unparseable_dates_yield_none(self, tmp_path):
+        run_dir = tmp_path / "run"
+        (run_dir / "metadata").mkdir(parents=True)
+        _write_csv(
+            run_dir / "metadata" / "filtered.csv",
+            ["uuid", "uploaded_at"],
+            [["1", "not-a-date"], ["2", ""]],
+        )
+        assert oam_weekly.scrape_uploaded_at(run_dir) is None
 
 
 class TestRunPipelineCommand:

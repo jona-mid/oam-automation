@@ -99,6 +99,18 @@ def load_ledger_filenames(csv_path: Path) -> Set[str]:
     return {normalize_filename(name) for name in df["filename"].dropna()}
 
 
+def scrape_uploaded_at(run_dir: Path) -> Optional[str]:
+    """Newest OAM upload date this run's scrape saw (uploaded_at column of the scrape CSV)."""
+    csv_path = run_dir / "metadata" / "filtered.csv"
+    if not csv_path.exists():
+        return None
+    df = pd.read_csv(csv_path, usecols=["uploaded_at"])
+    parsed = pd.to_datetime(df["uploaded_at"], errors="coerce", utc=True)
+    if not parsed.notna().any():
+        return None
+    return parsed.max().strftime("%Y-%m-%d")
+
+
 def build_upload_kwargs(row: pd.Series, run_date: date) -> dict:
     """Build deadtrees-cli upload kwargs from a joined candidate row. Fails closed on unknown values."""
     acquisition_raw = row["acquisition_date"]
@@ -165,13 +177,14 @@ def append_ledger_row(csv_path: Path, filename: str, kwargs: dict) -> None:
         )
 
 
-def write_status(path: Path, run_dir: Path, dry_run: bool, counts: RunCounts, exit_status: str, uploaded_after: Optional[str] = None) -> None:
+def write_status(path: Path, run_dir: Path, dry_run: bool, counts: RunCounts, exit_status: str, uploaded_after: Optional[str] = None, scrape_uploaded_at: Optional[str] = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
         f"run_dir: {run_dir}",
         f"dry_run: {dry_run}",
         f"uploaded_after: {uploaded_after or ''}",
+        f"scrape_uploaded_at: {scrape_uploaded_at or ''}",
         f"candidates: {counts.candidates}",
         f"uploaded: {counts.uploaded}",
         f"failed: {counts.failed}",
@@ -227,14 +240,24 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 def resolve_uploaded_after(explicit: Optional[str], status_file: Path) -> Optional[str]:
-    """Explicit flag wins; else the date of the last run's status timestamp."""
+    """Explicit flag wins; else the newest upload the last run's scrape saw; else its timestamp date."""
     if explicit:
         return explicit
     if status_file.exists():
+        scrape_at = None
+        stamp_date = None
         for line in status_file.read_text(encoding="utf-8").splitlines():
-            if line.startswith("timestamp:"):
+            if line.startswith("scrape_uploaded_at:"):
+                value = line.split(":", 1)[1].strip()
+                if value:
+                    scrape_at = value
+            elif line.startswith("timestamp:"):
                 stamp = line.split(":", 1)[1].strip()
-                return stamp.split("T")[0]
+                stamp_date = stamp.split("T")[0]
+        if scrape_at:
+            return scrape_at
+        if stamp_date:
+            return stamp_date
     return None
 
 
@@ -378,7 +401,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Run aborted: {error}")
         exit_status = "failed"
     finally:
-        write_status(status_file, run_dir, args.dry_run, counts, exit_status, uploaded_after)
+        try:
+            scrape_at = scrape_uploaded_at(run_dir)
+        except Exception as error:
+            print(f"  ! Could not derive scrape_uploaded_at ({error})")
+            scrape_at = None
+        write_status(status_file, run_dir, args.dry_run, counts, exit_status, uploaded_after, scrape_at)
 
     return 0 if exit_status in ("success", "dry-run") else 1
 
