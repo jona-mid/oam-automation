@@ -2,8 +2,6 @@
 
 Weekly OpenAerialMap (OAM) harvest for deadtrees.earth: fetch new imagery, filter it, classify season with MODIS phenology, review tree-canopy state with a VLM, and upload the qualifying images as new datasets. Runs as a single command per week (`oam_weekly.py`), currently driven manually, designed for a systemd timer.
 
-Status: running. Validated over two trial weeks (37 + 25 window candidates, uploads deduplicated against the platform). 27 datasets uploaded so far.
-
 ## How it works
 
 ```
@@ -42,7 +40,3 @@ python oam_weekly.py [--output-dir DIR] [--dry-run] [--skip-server-check]
 - **Earth Engine forest filter:** the ESA WorldCover forest-percentage filter (`forest > 0`) is included but not used by default. The VLM check covers the same concern (tree-canopy presence), and Earth Engine can cause cost. It can be re-enabled with `pipeline.py --forest-min 0 --forest-max 100`; without bounds no EE call happens, and an EE error rate above 10% aborts loudly instead of silently dropping records.
 - **VLM audit:** `aerial_phenology_audit.py` (copied verbatim from `aerial-phenology-audit`), model `google/gemini-3-flash-preview` via OpenRouter, ~$0.0008/image, only `in_season` images are reviewed. `OPENROUTER_API_KEY` required; missing key fails closed. `phenology-run` is resumable at zero cost.
 - Configuration lives in the gitignored `.env` (OpenRouter key, platform account, endpoints, ledger path). It is not part of this repo.
-
-## Tests
-
-`python -m pytest tests/` - 186 tests, all green.
