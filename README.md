@@ -37,6 +37,6 @@ python oam_weekly.py [--output-dir DIR] [--dry-run] [--skip-server-check]
 
 ## Notes
 
-- **Earth Engine forest filter:** the ESA WorldCover forest-percentage filter (`forest > 0`) is included but not used by default. The VLM check covers the same concern (tree-canopy presence), and Earth Engine can cause cost. It can be re-enabled with `pipeline.py --forest-min 0 --forest-max 100`; without bounds no EE call happens, and an EE error rate above 10% aborts loudly instead of silently dropping records.
+- **Earth Engine forest filter:** the ESA WorldCover forest-percentage filter (`forest > 0`) is included but not used by default. The VLM check covers the same concern (tree-canopy presence), and Earth Engine can cause cost. It can be re-enabled with `pipeline.py --forest-min 0 --forest-max 100`.
 - **VLM audit:** `aerial_phenology_audit.py` (copied verbatim from `aerial-phenology-audit`), model `google/gemini-3-flash-preview` via OpenRouter, ~$0.0008/image, only `in_season` images are reviewed. `OPENROUTER_API_KEY` required; missing key fails closed. `phenology-run` is resumable at zero cost.
-- Configuration lives in the gitignored `.env` (OpenRouter key, platform account, endpoints, ledger path). It is not part of this repo.
+- Configuration in `.env` (OpenRouter key, platform account, endpoints, ledger path). It is not part of this repo.
