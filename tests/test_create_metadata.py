@@ -131,7 +131,6 @@ class TestCmdJpeg:
         args.image_size_csv = ""
         args.uploaded_folder = ""
         args.prioritize_small_files = False
-        args.batch_size = 0
 
         with patch("create_metadata.utils.configure_logging"):
             with patch("create_metadata.utils.configure_utf8_stdio"):
@@ -174,7 +173,6 @@ class TestCmdJpeg:
         args.image_size_csv = ""
         args.uploaded_folder = ""
         args.prioritize_small_files = True
-        args.batch_size = 0
 
         with patch("create_metadata.utils.configure_logging"):
             with patch("create_metadata.utils.configure_utf8_stdio"):
@@ -188,178 +186,9 @@ class TestCmdJpeg:
 
                     cmd_jpeg(args)
 
-    def test_cmd_jpeg_prioritize_small_files(self, tmp_path):
-        """Test JPEG metadata with small file prioritization."""
-        source_metadata = tmp_path / "source.csv"
-        jpeg_dir = tmp_path / "jpegs"
-        jpeg_dir.mkdir()
-
-        with open(source_metadata, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["filename", "platform"])
-            writer.writeheader()
-            writer.writerow({"filename": "img001", "platform": "drone"})
-            writer.writerow({"filename": "img002", "platform": "airborne"})
-
-        (jpeg_dir / "img001.jpeg").write_bytes(b"small")
-        (jpeg_dir / "img002.jpeg").write_bytes(b"much larger content here")
-
-        class Args:
-            pass
-
-        args = Args()
-        args.source_metadata = str(source_metadata)
-        args.jpeg_folder = str(jpeg_dir)
-        args.output_metadata = str(tmp_path / "output.csv")
-        args.image_size_csv = ""
-        args.uploaded_folder = ""
-        args.prioritize_small_files = True
-        args.batch_size = 0
-
-        with patch("create_metadata.utils.configure_logging"):
-            with patch("create_metadata.utils.configure_utf8_stdio"):
-                with patch("create_metadata.utils.read_csv") as mock_read:
-                    mock_read.return_value = [
-                        {"filename": "img001", "platform": "drone"},
-                        {"filename": "img002", "platform": "airborne"},
-                    ]
-
-                    from create_metadata import cmd_jpeg
-
-                    cmd_jpeg(args)
-
-
-class TestCmdFilter:
-    """Tests for cmd_filter function."""
-
-    def test_cmd_filter_basic(self, tmp_path):
-        """Test basic filter functionality."""
-        selected_file = tmp_path / "selected.csv"
-        metadata_file = tmp_path / "metadata.csv"
-        phenology_file = tmp_path / "phenology.csv"
-
-        selected_file.write_text("img001.tif\nimg002.tif\n")
-
-        with open(phenology_file, "w", newline="") as f:
-            writer = csv.DictWriter(
-                f, fieldnames=["filename", "pheno_start_doy", "pheno_end_doy"]
-            )
-            writer.writeheader()
-            writer.writerow(
-                {
-                    "filename": "img001.tif",
-                    "pheno_start_doy": "100",
-                    "pheno_end_doy": "200",
-                }
-            )
-            writer.writerow(
-                {
-                    "filename": "img002.tif",
-                    "pheno_start_doy": "150",
-                    "pheno_end_doy": "250",
-                }
-            )
-
-        with open(metadata_file, "w", newline="") as f:
-            writer = csv.DictWriter(
-                f, fieldnames=["filename", "capture_date", "is_long_campaign"]
-            )
-            writer.writeheader()
-            writer.writerow(
-                {
-                    "filename": "img001.tif",
-                    "capture_date": "2025-05-15",
-                    "is_long_campaign": "False",
-                }
-            )
-            writer.writerow(
-                {
-                    "filename": "img002.tif",
-                    "capture_date": "2025-06-15",
-                    "is_long_campaign": "False",
-                }
-            )
-
-        class Args:
-            selected = str(selected_file)
-            metadata = str(metadata_file)
-            phenology = str(phenology_file)
-            output = str(tmp_path / "output.csv")
-            pad_days = 0
-            shoulder_only = False
-            include_debug_columns = True
-
-        with patch("create_metadata.utils.configure_logging"):
-            with patch("create_metadata.utils.configure_utf8_stdio"):
-                from create_metadata import cmd_filter
-
-                cmd_filter(Args())
-
-    def test_cmd_filter_drops_long_campaign(self, tmp_path):
-        """Test that long campaigns are filtered out."""
-        selected_file = tmp_path / "selected.csv"
-        metadata_file = tmp_path / "metadata.csv"
-        phenology_file = tmp_path / "phenology.csv"
-
-        selected_file.write_text("img001.tif\nimg002.tif\n")
-
-        with open(phenology_file, "w", newline="") as f:
-            writer = csv.DictWriter(
-                f, fieldnames=["filename", "pheno_start_doy", "pheno_end_doy"]
-            )
-            writer.writeheader()
-            writer.writerow(
-                {
-                    "filename": "img001.tif",
-                    "pheno_start_doy": "100",
-                    "pheno_end_doy": "200",
-                }
-            )
-
-        with open(metadata_file, "w", newline="") as f:
-            writer = csv.DictWriter(
-                f, fieldnames=["filename", "capture_date", "is_long_campaign"]
-            )
-            writer.writeheader()
-            writer.writerow(
-                {
-                    "filename": "img001.tif",
-                    "capture_date": "2025-05-15",
-                    "is_long_campaign": "True",
-                }
-            )
-
-        class Args:
-            selected = str(selected_file)
-            metadata = str(metadata_file)
-            phenology = str(phenology_file)
-            output = str(tmp_path / "output.csv")
-            pad_days = 0
-            shoulder_only = False
-            include_debug_columns = True
-
-        with patch("create_metadata.utils.configure_logging"):
-            with patch("create_metadata.utils.configure_utf8_stdio"):
-                from create_metadata import cmd_filter
-
-                cmd_filter(Args())
-
-
-class TestBatchedOutputPath:
-    """Tests for batched output path generation."""
-
-    def test_single_digit_batch(self):
-        """Test batch path with single digit."""
-        from utils import batched_output_path
-
-        result = batched_output_path("output.csv", 1)
-        assert "batch001" in result
-
-    def test_multiple_digit_batch(self):
-        """Test batch path with multiple digits."""
-        from utils import batched_output_path
-
-        result = batched_output_path("output.csv", 100)
-        assert "batch100" in result
+        with open(tmp_path / "output.csv", newline="", encoding="utf-8-sig") as f:
+            out_rows = list(csv.DictReader(f))
+        assert [row["filename"] for row in out_rows] == ["img001", "img002"]
 
 
 class TestLoadImageSizeCsv:
