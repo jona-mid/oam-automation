@@ -4,7 +4,7 @@ Weekly OpenAerialMap harvest for deadtrees.earth: scrape new OAM uploads, filter
 
 ## Setup
 
-Python 3.10+. `deadtrees-cli` needs a full checkout of the deadtrees monorepo because it also installs the monorepo's `shared` package.
+Python 3.11+. `deadtrees-cli` needs a full checkout of the deadtrees monorepo because it also installs the monorepo's `shared` package.
 
 ```bash
 git clone https://github.com/Deadwood-ai/deadtrees.git ../deadtrees
@@ -18,17 +18,17 @@ cp .env.example .env   # fill in
 - `OAM_UPLOADED_CSV`: the upload ledger, currently `/mnt/gsdata/projects/deadtrees/data_openaerialmap/metadata_uploaded.csv`. Keep exactly one.
 - The rest are the platform account and endpoints for `deadtrees-cli`.
 
-## Run and schedule
+## Run
 
 ```bash
 .venv/bin/python oam_weekly.py --uploaded-after YYYY-MM-DD   # first run only
 .venv/bin/python oam_weekly.py                               # every run after that
 ```
 
-The first run needs the date of the last harvest. After that, each run continues where the previous one stopped (`runs/last_run.txt`). Schedule it weekly with a systemd timer or cron, e.g. `0 3 * * 1 cd /path/to/oam-automation && .venv/bin/python oam_weekly.py >> runs/weekly.log 2>&1`.
+The first run needs the date of the last harvest. After that, each run continues where the previous one stopped (`runs/last_run.txt`). To run it weekly, see [Deploy](#deploy).
 
 - Each run writes a `runs/<date>/` folder (prune old ones); progress and errors go to stdout/stderr.
-- A failed run exits 1, so alert on that (systemd `OnFailure=`, or cron mail).
+- A failed run exits 1.
 
 Options: `--dry-run` lists upload candidates from an existing run folder without uploading. Re-running on the same day resumes `runs/<today>`; `--output-dir DIR` picks another folder. `--uploaded-after` / `--uploaded-before` run an ad-hoc date window (both inclusive; use a fresh `--output-dir`). `--skip-server-check` skips the platform filename check.
 
@@ -47,3 +47,33 @@ scrape -> filter -> phenology -> thumbnails/TIFFs -> JPEGs -> VLM check -> uploa
 - **Skipping a period on purpose:** edit `scrape_uploaded_at` in `last_run.txt`.
 - **Earth Engine forest filter:** kept but off; the weekly run never enables it (see `pipeline.py --forest-min/--forest-max`).
 - **Tests:** `pip install pytest && python -m pytest` (no network or credentials needed).
+
+## Deploy
+
+`/etc/systemd/system/oam-weekly.service`:
+
+```ini
+[Unit]
+Description=Weekly OAM harvest for deadtrees.earth
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=<service user>
+WorkingDirectory=/opt/oam-automation
+ExecStart=/opt/oam-automation/.venv/bin/python oam_weekly.py
+```
+
+`/etc/systemd/system/oam-weekly.timer`:
+
+```ini
+[Timer]
+OnCalendar=Mon *-*-* 03:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+After the first manual run, enable it with `sudo systemctl daemon-reload && sudo systemctl enable --now oam-weekly.timer`. Logs are in `journalctl -u oam-weekly`.
