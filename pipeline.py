@@ -108,19 +108,22 @@ def main():
     if not any(row.get("pheno_season") == "in_season" for row in csv_rows(pheno_csv)):
         return finish("no in-season images in the upload window")
 
-    if not any(thumbnails.iterdir()):
-        # Only in-season images can pass the upload gate; the TIFF download
-        # follows the thumbnails, so out-of-season TIFFs are never fetched.
-        run("download.py", "thumbnails", "--csv", pheno_csv, "--folder", thumbnails, "--season", "in_season", "--workers", args.thumbnail_workers, cwd=output)
+    # The download stages always run: they skip files already fetched, so a
+    # resumed run completes a download that died partway instead of silently
+    # continuing with a partial set. Only in-season images can pass the
+    # upload gate; the TIFF download follows the thumbnails, so out-of-season
+    # TIFFs are never fetched.
+    run("download.py", "thumbnails", "--csv", pheno_csv, "--folder", thumbnails, "--season", "in_season", "--workers", args.thumbnail_workers, cwd=output)
     manifest["stages"]["thumbnails"] = {"files": count_files(thumbnails, {".png", ".jpg", ".jpeg"}), "output": str(thumbnails)}
 
-    if not any(tifs.iterdir()):
-        run("download.py", "tifs", "--csv", pheno_csv, "--thumbnails-dir", thumbnails, "--output-dir", tifs, "--workers", args.tif_workers, cwd=output)
+    run("download.py", "tifs", "--csv", pheno_csv, "--thumbnails-dir", thumbnails, "--output-dir", tifs, "--workers", args.tif_workers, cwd=output)
     manifest["stages"]["tifs"] = {"files": count_files(tifs, {".tif", ".tiff"}), "output": str(tifs)}
     if not manifest["stages"]["tifs"]["files"]:
         return finish("no GeoTIFFs downloaded")
 
-    if not any(jpegs.iterdir()):
+    tif_stems = {item.stem for item in tifs.iterdir() if item.suffix.lower() in {".tif", ".tiff"}}
+    jpeg_stems = {item.stem for item in jpegs.iterdir() if item.suffix.lower() in {".jpeg", ".jpg"}}
+    if tif_stems - jpeg_stems:
         run("tif_to_jpeg.py", "--input-dir", tifs, "--output-dir", jpegs, "--workers", args.jpeg_workers, cwd=output)
     manifest["stages"]["jpegs"] = {"files": count_files(jpegs, {".jpeg", ".jpg"}), "output": str(jpegs)}
 
