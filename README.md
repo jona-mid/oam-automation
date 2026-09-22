@@ -26,7 +26,7 @@ python oam_weekly.py [--output-dir DIR] [--dry-run] [--skip-server-check]
 
 - `--uploaded-after YYYY-MM-DD` restricts the run to OAM uploads on or after that date, so weekly runs process only new images instead of the full catalog (~8,800 filter-passing candidates). Resolution order: explicit flag, then the date in the last run's status file, then fail fast. The first run must pass the flag explicitly.
 - `--dry-run` lists gate candidates and exact upload kwargs with zero upload calls.
-- `--skip-server-check` skips the platform-side duplicate check (diff leg 2).
+- `--skip-server-check` skips check for identical `file_name`
 - Each run writes a status file (`last_run.txt` next to the run dirs) with timestamp, counts, and exit status.
 
 ## Reliability
