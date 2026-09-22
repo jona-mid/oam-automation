@@ -1,10 +1,12 @@
 import pandas as pd
 import argparse
+import sys
 import ee
 from utils import parse_bbox_string
 
 _worldcover = None
 _forest_mask = None
+_ee_errors = 0
 
 
 def _get_forest_mask():
@@ -35,6 +37,7 @@ def init_earthengine(authenticate_if_needed=False):
 
 def calculate_forest_percentage(bbox_coords):
     """Compute forest % for bbox coordinates using Earth Engine."""
+    global _ee_errors
     if bbox_coords is None:
         return None
 
@@ -50,6 +53,7 @@ def calculate_forest_percentage(bbox_coords):
         forest_fraction = stats.get("Map", 0)
         return float(forest_fraction) * 100 if forest_fraction is not None else 0.0
     except Exception as e:
+        _ee_errors += 1
         print(f"Error calculating forest percentage: {e}")
         return None
 
@@ -316,35 +320,58 @@ def main():
     filtered_df.to_csv(output_csv_file, index=False)
     print(f"Saved filtered dataset to {output_csv_file}")
 
-    # Initialize Earth Engine and calculate forest percentages
+    bounds_given = args.forest_percentage_min is not None or args.forest_percentage_max is not None
+
+    if not bounds_given:
+        # Convert uploaded_at to datetime if it exists (for potential later use)
+        if "uploaded_at" in filtered_df.columns:
+            filtered_df["uploaded_at"] = pd.to_datetime(
+                filtered_df["uploaded_at"], utc=True
+            )
+        filtered_df.to_csv(output_csv_file, index=False)
+        print(f"Processing complete. Results saved to {output_csv_file}.")
+        return
+
+    # Earth Engine forest percentages are computed only when bounds are provided.
     ee_ready = init_earthengine(authenticate_if_needed=False)
     if not ee_ready:
         print(
             "Earth Engine not initialized. Call init_earthengine(authenticate_if_needed=True) or run ee.Authenticate() interactively."
         )
-        filtered_df["forest_percentage_gee"] = None
-    else:
-        # Apply the function to each row of the FILTERED DataFrame to get the forest percentage
-        print("\nCalculating forest percentages for filtered records...")
-        from tqdm import tqdm
-
-        tqdm.pandas(desc="Calculating forest percentages")
-        filtered_df["forest_percentage_gee"] = filtered_df["bbox"].progress_apply(
-            lambda x: calculate_forest_percentage(parse_bbox_string(x))
-        )
-
-        # Debug: show statistics
-        non_null_count = filtered_df["forest_percentage_gee"].notna().sum()
         print(
-            f"Calculated forest percentages: {non_null_count} non-null values out of {len(filtered_df)}"
+            "Aborting instead of applying the forest filter without data, which would drop every record."
         )
-        if non_null_count > 0:
-            print(
-                f"Forest percentage range: {filtered_df['forest_percentage_gee'].min():.2f}% - {filtered_df['forest_percentage_gee'].max():.2f}%"
-            )
-            print(
-                f"Mean forest percentage: {filtered_df['forest_percentage_gee'].mean():.2f}%"
-            )
+        sys.exit(1)
+
+    print("\nCalculating forest percentages for filtered records...")
+    from tqdm import tqdm
+
+    tqdm.pandas(desc="Calculating forest percentages")
+    global _ee_errors
+    _ee_errors = 0
+    filtered_df["forest_percentage_gee"] = filtered_df["bbox"].progress_apply(
+        lambda x: calculate_forest_percentage(parse_bbox_string(x))
+    )
+
+    if len(filtered_df) > 0 and _ee_errors / len(filtered_df) > 0.10:
+        print(
+            f"Earth Engine failed for {_ee_errors} of {len(filtered_df)} records. "
+            "Aborting instead of silently filtering out those records."
+        )
+        sys.exit(1)
+
+    # Debug: show statistics
+    non_null_count = filtered_df["forest_percentage_gee"].notna().sum()
+    print(
+        f"Calculated forest percentages: {non_null_count} non-null values out of {len(filtered_df)}"
+    )
+    if non_null_count > 0:
+        print(
+            f"Forest percentage range: {filtered_df['forest_percentage_gee'].min():.2f}% - {filtered_df['forest_percentage_gee'].max():.2f}%"
+        )
+        print(
+            f"Mean forest percentage: {filtered_df['forest_percentage_gee'].mean():.2f}%"
+        )
 
     # Convert uploaded_at to datetime if it exists (for potential later use)
     if "uploaded_at" in filtered_df.columns:
@@ -352,37 +379,21 @@ def main():
             filtered_df["uploaded_at"], utc=True
         )
 
-    # Apply forest percentage filter if bounds are provided
-    if args.forest_percentage_min is not None or args.forest_percentage_max is not None:
-        # Check if forest_percentage_gee column exists
-        if "forest_percentage_gee" not in filtered_df.columns:
-            print(
-                "Warning: 'forest_percentage_gee' column not found. Cannot apply forest percentage filter."
-            )
-            print(
-                "Forest percentage calculation may have failed. Check Earth Engine initialization."
-            )
-        else:
-            # Call filter_openaerial_data with only forest parameters to apply forest filter
-            # Other filters are skipped because uploaded_after_date=None and we pass the already-filtered data
-            filtered_df = filter_openaerial_data(
-                filtered_df,
-                max_gsd_cm=1000,  # Set high to skip GSD filter
-                uploaded_after_date=None,  # Skip date filter
-                uploaded_before_date=None,  # Skip date filter
-                platform_type=[],  # Empty list to skip platform filter
-                forest_percentage_min=args.forest_percentage_min,
-                forest_percentage_max=args.forest_percentage_max,
-            )
+    # Call filter_openaerial_data with only forest parameters to apply forest filter
+    # Other filters are skipped because uploaded_after_date=None and we pass the already-filtered data
+    filtered_df = filter_openaerial_data(
+        filtered_df,
+        max_gsd_cm=1000,  # Set high to skip GSD filter
+        uploaded_after_date=None,  # Skip date filter
+        uploaded_before_date=None,  # Skip date filter
+        platform_type=[],  # Empty list to skip platform filter
+        forest_percentage_min=args.forest_percentage_min,
+        forest_percentage_max=args.forest_percentage_max,
+    )
 
-            # Save final filtered results (overwrite openaerial_data_filtered.csv)
-            filtered_df.to_csv(output_csv_file, index=False)
-            print(f"Processing complete. Final results saved to {output_csv_file}.")
-            return
-
-    # Save filtered results (if no forest filtering was applied)
+    # Save final filtered results (overwrite openaerial_data_filtered.csv)
     filtered_df.to_csv(output_csv_file, index=False)
-    print(f"Processing complete. Results saved to {output_csv_file}.")
+    print(f"Processing complete. Final results saved to {output_csv_file}.")
 
 
 if __name__ == "__main__":

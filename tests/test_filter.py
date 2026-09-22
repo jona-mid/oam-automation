@@ -246,3 +246,71 @@ class TestInitEarthengine:
         result = init_earthengine(authenticate_if_needed=True)
 
         assert result is True
+
+
+def _write_main_input(tmp_path):
+    df = pd.DataFrame(
+        [
+            {"id": "1", "gsd": "0.05", "property_bands": "3", "platform": "uav", "bbox": "[1.0, 2.0, 3.0, 4.0]"},
+            {"id": "2", "gsd": "0.05", "property_bands": "3", "platform": "uav", "bbox": "[5.0, 6.0, 7.0, 8.0]"},
+            {"id": "2", "gsd": "0.05", "property_bands": "3", "platform": "uav", "bbox": "[5.0, 6.0, 7.0, 8.0]"},
+        ]
+    )
+    input_csv = tmp_path / "openaerial_data.csv"
+    df.to_csv(input_csv, index=False)
+    return input_csv
+
+
+class TestMainForestBoundsLazy:
+    """Earth Engine is only touched when forest bounds are provided."""
+
+    def test_no_bounds_skips_earth_engine(self, tmp_path, monkeypatch):
+        import filter as filter_module
+
+        def no_ee(*args, **kwargs):
+            raise AssertionError("init_earthengine must not run without forest bounds")
+
+        monkeypatch.setattr(filter_module, "init_earthengine", no_ee)
+        input_csv = _write_main_input(tmp_path)
+        output_csv = tmp_path / "filtered.csv"
+        monkeypatch.setattr(
+            sys, "argv", ["filter.py", "--input", str(input_csv), "--output", str(output_csv)]
+        )
+
+        filter_module.main()
+
+        out = pd.read_csv(output_csv)
+        # 3 input rows, one duplicate bbox removed -> 2 records, no forest column
+        assert len(out) == 2
+        assert "forest_percentage_gee" not in out.columns
+
+    def test_high_ee_error_rate_aborts(self, tmp_path, monkeypatch):
+        import filter as filter_module
+
+        monkeypatch.setattr(filter_module, "init_earthengine", lambda *a, **k: True)
+
+        def failing_calc(bbox_coords):
+            filter_module._ee_errors += 1
+            return None
+
+        monkeypatch.setattr(filter_module, "calculate_forest_percentage", failing_calc)
+        input_csv = _write_main_input(tmp_path)
+        output_csv = tmp_path / "filtered.csv"
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "filter.py",
+                "--input",
+                str(input_csv),
+                "--output",
+                str(output_csv),
+                "--forest_percentage_min",
+                "0",
+                "--forest_percentage_max",
+                "100",
+            ],
+        )
+
+        with pytest.raises(SystemExit):
+            filter_module.main()
