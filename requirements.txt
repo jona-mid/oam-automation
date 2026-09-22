@@ -8,4 +8,6 @@ xarray
 zarr
 Pillow
 pydantic
-
+python-dotenv
+# Not on PyPI: install deadtrees-cli (and the `shared` package it brings)
+# from the deadtrees monorepo into the same environment.

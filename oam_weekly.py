@@ -2,7 +2,7 @@
 """Weekly wrapper: run the pipeline, gate candidates, upload via deadtrees-cli, update the ledger.
 
 Steps: pipeline subprocess -> VLM gate (in_season AND leaf_on AND review success)
--> two-legged diff (ledger CSV + server-side file_name check) -> upload each
+-> dedup (ledger CSV, server-side file_name check, content hash) -> upload each
 candidate -> append canonical rows to the ledger -> status file.
 
 Machine-specific configuration (ledger path, credentials) lives in the
@@ -47,6 +47,7 @@ class RunCounts:
     candidates: int = 0
     uploaded: int = 0
     failed: int = 0
+    rejected: int = 0
 
 
 class UploadSpec(NamedTuple):
@@ -86,8 +87,21 @@ def run_pipeline(
     subprocess.run(command, cwd=repo_root, check=True)
 
 
+def pipeline_stopped_early(run_dir: Path) -> Optional[str]:
+    """Reason the pipeline recorded for stopping before the VLM stage (nothing to review), else None."""
+    manifest_path = run_dir / "run_manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        return json.loads(manifest_path.read_text(encoding="utf-8")).get("stopped_early")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def load_gate_candidates(run_dir: Path) -> pd.DataFrame:
     """Join the VLM report with the canonical metadata rows and apply the upload gate."""
+    if pipeline_stopped_early(run_dir):
+        return pd.DataFrame(columns=["filename"])
     report = pd.read_csv(run_dir / "metadata" / "phenology_report.csv")
     jpeg_meta = pd.read_csv(run_dir / "metadata" / "jpeg_metadata.csv")
     # Both sides carry a `platform` column; keep the jpeg-metadata names clean.
@@ -280,6 +294,7 @@ def write_status(
         f"candidates: {counts.candidates}",
         f"uploaded: {counts.uploaded}",
         f"failed: {counts.failed}",
+        f"rejected: {counts.rejected}",
         f"exit: {exit_status}",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -469,7 +484,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                     f"with --uploaded-after {uploaded_after}"
                 )
 
-        if args.dry_run and not (run_dir / "metadata" / "phenology_report.csv").exists():
+        if (
+            args.dry_run
+            and not (run_dir / "metadata" / "phenology_report.csv").exists()
+            and not pipeline_stopped_early(run_dir)
+        ):
             raise RuntimeError(
                 f"Dry run needs an existing run dir with pipeline outputs; none at {run_dir}"
             )
@@ -525,7 +544,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         ledger = load_ledger_filenames(args.uploaded_csv)
         prep = prepare_candidates(gate, ledger, run_dir, server_check=not args.skip_server_check)
         counts.candidates = prep.candidates
-        counts.failed = prep.rejected
+        counts.rejected = prep.rejected
         print(f"Gate passed {len(gate)} images; {prep.candidates} not in the ledger.")
 
         if args.dry_run:
@@ -547,8 +566,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 counts.uploaded += 1
                 print(f"  + {spec.filename} uploaded (dataset {dataset_id}), ledger row appended")
             print(
-                f"Summary: {counts.candidates} candidates, "
-                f"{counts.uploaded} uploaded, {counts.failed} failed."
+                f"Summary: {counts.candidates} candidates, {counts.uploaded} uploaded, "
+                f"{counts.failed} failed, {counts.rejected} rejected (bad metadata, not retried)."
             )
             exit_status = "success" if counts.failed == 0 else "failed"
     except Exception as error:
@@ -560,39 +579,41 @@ def main(argv: Optional[List[str]] = None) -> int:
         except Exception as error:
             print(f"  ! Could not derive scrape_uploaded_at ({error})")
             scrape_at = None
-        # Dry runs never upload, so they must never advance the weekly chain
-        # (a reused/pipeline-built dir could otherwise push it past data that
-        # was never uploaded). Upload runs advance only when their window
-        # covered the chain point.
+        # Dry runs never upload, so they must never advance the weekly chain.
+        # A failed run holds the chain where it was, so the next scheduled run
+        # re-covers its window (VLM errors, failed uploads, crashes); dedup
+        # skips whatever did get uploaded. Only a successful run advances,
+        # and only when its window covered the chain point.
         if args.dry_run:
             chain_value = stored_scrape
+        elif exit_status != "success":
+            chain_value = stored_scrape or uploaded_after
+            if uploaded_after and chain_value:
+                # The next scheduled run covers [chain, open end); only a
+                # window reaching below the chain point is left uncovered.
+                try:
+                    rewind = date.fromisoformat(uploaded_after) < date.fromisoformat(chain_value)
+                except ValueError:
+                    rewind = False
+                if rewind:
+                    retry_flags = f"--uploaded-after {uploaded_after}"
+                    if args.uploaded_before:
+                        retry_flags += f" --uploaded-before {args.uploaded_before}"
+                    print(
+                        f"  ! run failed; the next scheduled run does not cover this ad-hoc window; "
+                        f"to retry, re-run with {retry_flags} and the same --output-dir"
+                    )
+                else:
+                    print(
+                        f"  ! run failed; the weekly window stays at {chain_value}, so the next "
+                        f"scheduled run retries it (or re-run now with --output-dir {run_dir})"
+                    )
         else:
             chain_value, chain_warning = advance_scrape_uploaded_at(
                 stored_scrape, scrape_at, uploaded_after
             )
             if chain_warning:
                 print(f"  ! {chain_warning}")
-            # Recovery hint for any failed run whose window the next auto
-            # run will not re-cover: either the chain advanced past
-            # unuploaded data, or the window reached below the chain (a
-            # rewind run that died partway).
-            if exit_status == "failed" and uploaded_after and chain_value:
-                advanced = chain_value != stored_scrape
-                below_chain = False
-                try:
-                    below_chain = date.fromisoformat(uploaded_after) < date.fromisoformat(chain_value)
-                except ValueError:
-                    below_chain = False
-                if advanced or below_chain:
-                    retry_flags = f"--uploaded-after {uploaded_after}"
-                    if args.uploaded_before:
-                        retry_flags += f" --uploaded-before {args.uploaded_before}"
-                    detail = f"{counts.failed} upload(s) failed" if counts.failed else "the run aborted"
-                    print(
-                        f"  ! {detail}; this window is not re-covered by the next auto run; "
-                        f"to retry, re-run with {retry_flags} into a fresh --output-dir "
-                        "(or the same dir with the same window flags)"
-                    )
         write_status(
             status_file,
             run_dir,

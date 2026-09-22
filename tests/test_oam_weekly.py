@@ -888,44 +888,104 @@ class TestMainRecoveryAndManifestChecks:
         assert result == 0
         assert "cannot be verified" in capsys.readouterr().out
 
-    def test_failed_window_run_hint_includes_before_flag(self, tmp_path, monkeypatch, capsys):
-        self._seed_dir(tmp_path, {"uploaded_after_date": "2026-09-06", "uploaded_before_date": "2026-09-20"})
-        self._seed_chain(tmp_path)
-        spec = oam_weekly.UploadSpec("a.tif", tmp_path / "a.tif", {"authors": ["x"]})
+    def _stub_pipeline(self, monkeypatch, prep):
         monkeypatch.setattr(oam_weekly, "run_pipeline", lambda *a, **k: None)
         monkeypatch.setattr(oam_weekly, "load_gate_candidates", lambda run_dir: pd.DataFrame())
         monkeypatch.setattr(
-            oam_weekly,
-            "prepare_candidates",
-            lambda gate, ledger, run_dir, server_check: oam_weekly.Preparation(1, [spec], 0),
+            oam_weekly, "prepare_candidates", lambda gate, ledger, run_dir, server_check: prep
         )
+
+    def test_failed_upload_holds_chain(self, tmp_path, monkeypatch, capsys):
+        self._seed_dir(tmp_path, {"uploaded_after_date": "2026-09-06", "uploaded_before_date": "None"})
+        status = self._seed_chain(tmp_path)
+        spec = oam_weekly.UploadSpec("a.tif", tmp_path / "a.tif", {"authors": ["x"]})
+        self._stub_pipeline(monkeypatch, oam_weekly.Preparation(1, [spec], 0))
 
         def failing_upload(tif_path, **kwargs):
             raise RuntimeError("platform down")
 
         monkeypatch.setattr(oam_weekly.deadtrees_seam, "upload_and_process", failing_upload)
+        result = oam_weekly.main(self._argv(tmp_path, []))
+        assert result == 1
+        text = status.read_text(encoding="utf-8")
+        # The scrape saw 2026-09-19, but a failed run must not move the chain.
+        assert "scrape_uploaded_at: 2026-09-06" in text
+        assert "failed: 1" in text
+        assert "next scheduled run retries it" in capsys.readouterr().out
+
+    def test_aborted_run_holds_chain(self, tmp_path, monkeypatch):
+        self._seed_dir(tmp_path, {"uploaded_after_date": "2026-09-06", "uploaded_before_date": "None"})
+        status = self._seed_chain(tmp_path)
+
+        def broken_pipeline(*args, **kwargs):
+            raise RuntimeError("VLM review failed for 3 in-season image(s)")
+
+        monkeypatch.setattr(oam_weekly, "run_pipeline", broken_pipeline)
+        result = oam_weekly.main(self._argv(tmp_path, []))
+        assert result == 1
+        assert "scrape_uploaded_at: 2026-09-06" in status.read_text(encoding="utf-8")
+
+    def test_failed_first_run_seeds_chain_with_window_start(self, tmp_path, monkeypatch):
+        self._seed_dir(tmp_path, {"uploaded_after_date": "2026-09-01", "uploaded_before_date": "None"})
+
+        def broken_pipeline(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(oam_weekly, "run_pipeline", broken_pipeline)
+        result = oam_weekly.main(self._argv(tmp_path, ["--uploaded-after", "2026-09-01"]))
+        assert result == 1
+        text = (tmp_path / "last_run.txt").read_text(encoding="utf-8")
+        assert "scrape_uploaded_at: 2026-09-01" in text
+
+    def test_failed_rewind_window_prints_retry_flags(self, tmp_path, monkeypatch, capsys):
+        self._seed_dir(tmp_path, {"uploaded_after_date": "2026-09-01", "uploaded_before_date": "2026-09-05"})
+        status = self._seed_chain(tmp_path, "2026-09-10")
+
+        def broken_pipeline(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(oam_weekly, "run_pipeline", broken_pipeline)
         result = oam_weekly.main(
-            self._argv(tmp_path, ["--uploaded-after", "2026-09-06", "--uploaded-before", "2026-09-20"])
+            self._argv(tmp_path, ["--uploaded-after", "2026-09-01", "--uploaded-before", "2026-09-05"])
         )
         assert result == 1
-        out = capsys.readouterr().out
-        assert "--uploaded-after 2026-09-06 --uploaded-before 2026-09-20" in out
-        assert "1 upload(s) failed" in out
+        assert "--uploaded-after 2026-09-01 --uploaded-before 2026-09-05" in capsys.readouterr().out
+        assert "scrape_uploaded_at: 2026-09-10" in status.read_text(encoding="utf-8")
 
-    def test_aborted_run_after_scrape_prints_recovery_hint(self, tmp_path, monkeypatch, capsys):
+    def test_rejected_candidates_do_not_fail_the_run(self, tmp_path, monkeypatch):
         self._seed_dir(tmp_path, {"uploaded_after_date": "2026-09-06", "uploaded_before_date": "None"})
-        self._seed_chain(tmp_path)
+        status = self._seed_chain(tmp_path)
+        self._stub_pipeline(monkeypatch, oam_weekly.Preparation(1, [], 1))
+        result = oam_weekly.main(self._argv(tmp_path, []))
+        assert result == 0
+        text = status.read_text(encoding="utf-8")
+        assert "rejected: 1" in text
+        assert "failed: 0" in text
+        assert "scrape_uploaded_at: 2026-09-19" in text
 
-        def broken_gate(run_dir):
-            raise RuntimeError("VLM report unreadable")
-
+    def test_pipeline_early_stop_is_an_empty_successful_run(self, tmp_path, monkeypatch):
+        run_dir = tmp_path / "run"
+        (run_dir / "metadata").mkdir(parents=True)
+        _write_csv(run_dir / "metadata" / "filtered.csv", ["uuid", "uploaded_at"], [])
+        (run_dir / "run_manifest.json").write_text(
+            json.dumps(
+                {
+                    "config": {"uploaded_after_date": "2026-09-06", "uploaded_before_date": "None"},
+                    "stopped_early": "no filter-passing images in the upload window",
+                }
+            ),
+            encoding="utf-8",
+        )
+        status = self._seed_chain(tmp_path)
         monkeypatch.setattr(oam_weekly, "run_pipeline", lambda *a, **k: None)
-        monkeypatch.setattr(oam_weekly, "load_gate_candidates", broken_gate)
-        result = oam_weekly.main(self._argv(tmp_path, ["--uploaded-after", "2026-09-06"]))
-        assert result == 1
-        out = capsys.readouterr().out
-        assert "the run aborted" in out
-        assert "--uploaded-after 2026-09-06" in out
+        monkeypatch.setattr(oam_weekly.deadtrees_seam, "file_exists_on_platform", lambda name: False)
+        result = oam_weekly.main(self._argv(tmp_path, []))
+        assert result == 0
+        text = status.read_text(encoding="utf-8")
+        assert "candidates: 0" in text
+        assert "scrape_uploaded_at: 2026-09-06" in text
+        # A dry run can inspect such a dir too, although it has no VLM report.
+        assert oam_weekly.main(self._argv(tmp_path, ["--dry-run"])) == 0
 
 
 class TestParseArgs:

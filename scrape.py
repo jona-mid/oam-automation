@@ -48,6 +48,9 @@ def fetch_openaerial_data(base_url="https://api.openaerialmap.org/meta", max_pag
                 print(f"Error fetching page {page}, attempt {attempt+1}: {str(e)}")
                 if attempt < retry_count - 1:
                     time.sleep(1)
+        else:
+            # A skipped page is a silent gap in the catalog; fail the run instead.
+            raise Exception(f"Failed to fetch page {page} after {retry_count} attempts")
         
         # Small delay to avoid overloading the API
         time.sleep(delay_between_requests)
