@@ -22,7 +22,6 @@ from utils import (
     in_leaf_on,
     in_leaf_on_padded,
     norm_filename,
-    load_selected_filenames,
     remap_platform,
     extract_author,
     is_long_campaign,
@@ -31,7 +30,6 @@ from utils import (
     load_download_state,
     save_download_state,
     extract_filename_from_url,
-    batched_output_path,
 )
 
 
@@ -215,34 +213,6 @@ class TestNormFilename:
         assert norm_filename("  TestFile  ") == "testfile"
 
 
-class TestLoadSelectedFilenames:
-    """Tests for load_selected_filenames function."""
-
-    def test_load_from_file(self):
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-            f.write("file1.tif\n")
-            f.write("file2.tif\n")
-            f.write("file3.tif\n")
-            temp_path = f.name
-
-        try:
-            result = load_selected_filenames(temp_path)
-            assert len(result) == 3
-            assert "file1.tif" in result
-        finally:
-            os.remove(temp_path)
-
-    def test_empty_file(self):
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-            temp_path = f.name
-
-        try:
-            result = load_selected_filenames(temp_path)
-            assert len(result) == 0
-        finally:
-            os.remove(temp_path)
-
-
 class TestRemapPlatform:
     """Tests for remap_platform function."""
 
@@ -362,15 +332,3 @@ class TestExtractFilenameFromUrl:
         url = ""
         result = extract_filename_from_url(url, ".tif")
         assert ".tif" in result
-
-
-class TestBatchedOutputPath:
-    """Tests for batched_output_path function."""
-
-    def test_batch_path_generation(self):
-        result = batched_output_path("output.csv", 1)
-        assert result.endswith("output_batch001.csv")
-
-    def test_batch_path_multiple_digits(self):
-        result = batched_output_path("output.csv", 100)
-        assert result.endswith("output_batch100.csv")

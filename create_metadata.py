@@ -10,8 +10,6 @@ Usage:
 
 import argparse
 import os
-import shutil
-from pathlib import Path
 
 import utils
 
@@ -268,139 +266,6 @@ def cmd_jpeg(args):
         f"Metadata CSV saved: {args.output_metadata} ({len(metadata_list)} entries)"
     )
 
-    if args.batch_size > 0:
-        _batch_jpeg_output(args, metadata_list, matched_jpeg_names, logger)
-
-
-def _batch_jpeg_output(args, metadata_list, matched_jpeg_names, logger):
-    """Handle batched output for JPEG metadata."""
-    batch_size = args.batch_size
-    total = len(metadata_list)
-    num_batches = (total + batch_size - 1) // batch_size
-
-    for i in range(num_batches):
-        start = i * batch_size
-        end = min(start + batch_size, total)
-        batch_rows = metadata_list[start:end]
-        batch_jpegs = matched_jpeg_names[start:end]
-
-        batch_path = utils.batched_output_path(args.output_metadata, i + 1)
-        utils.write_csv(batch_rows, batch_path)
-        logger.info(f"Batch saved: {batch_path} ({len(batch_rows)} entries)")
-
-        if args.jpeg_folder:
-            _copy_batch_images(args, batch_path, batch_jpegs, logger)
-
-
-def _copy_batch_images(args, batch_csv_path, jpeg_filenames, logger):
-    """Copy images for a batch."""
-    batch_csv = Path(batch_csv_path)
-    out_dir = batch_csv.parent / "batch_images_from_csv" / batch_csv.stem
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    copied = 0
-    missing = 0
-    for name in jpeg_filenames:
-        src = Path(args.jpeg_folder) / name
-        if not src.exists():
-            missing += 1
-            continue
-        dst = out_dir / src.name
-        if not dst.exists():
-            shutil.copy2(src, dst)
-            copied += 1
-
-    logger.info(f"Batch images ready: {out_dir} (copied={copied}, missing={missing})")
-
-
-def cmd_filter(args):
-    """Filter metadata by selection, phenology, and campaign length."""
-    logger = utils.configure_logging()
-    utils.configure_utf8_stdio()
-
-    selected = utils.load_selected_filenames(args.selected)
-    pheno_map = utils.load_phenology_map(args.phenology)
-
-    logger.info(f"Loaded {len(selected)} selected filenames")
-    logger.info(f"Loaded {len(pheno_map)} phenology entries")
-
-    metadata_rows = utils.read_csv(args.metadata)
-    logger.info(f"Reading {len(metadata_rows)} rows from {args.metadata}")
-
-    output_rows = []
-    total = 0
-    kept = 0
-    dropped = {}
-
-    for row in metadata_rows:
-        total += 1
-        fname = utils.norm_filename(row.get("filename", ""))
-
-        if fname not in selected:
-            dropped["not_selected"] = dropped.get("not_selected", 0) + 1
-            continue
-
-        if utils.parse_bool(row.get("is_long_campaign", "")):
-            dropped["long_campaign"] = dropped.get("long_campaign", 0) + 1
-            continue
-
-        pixels = row.get("pixels", "")
-        if pixels:
-            try:
-                pixel_count = int(pixels)
-                if args.min_pixels is not None and pixel_count < args.min_pixels:
-                    dropped["min_pixels"] = dropped.get("min_pixels", 0) + 1
-                    continue
-                if args.max_pixels is not None and pixel_count > args.max_pixels:
-                    dropped["max_pixels"] = dropped.get("max_pixels", 0) + 1
-                    continue
-            except (ValueError, TypeError):
-                pass
-
-        capture_date = utils.parse_iso_date(row.get("capture_date", ""))
-        if not capture_date:
-            dropped["missing_date"] = dropped.get("missing_date", 0) + 1
-            continue
-
-        capture_doy = utils.date_to_doy(capture_date)
-
-        pheno = pheno_map.get(fname)
-        if not pheno or pheno[0] is None or pheno[1] is None:
-            dropped["missing_phenology"] = dropped.get("missing_phenology", 0) + 1
-            continue
-
-        pheno_start, pheno_end = pheno
-        in_season = utils.in_leaf_on(capture_doy, pheno_start, pheno_end)
-        in_padded = utils.in_leaf_on_padded(
-            capture_doy, pheno_start, pheno_end, pad_days=args.pad_days
-        )
-
-        if args.shoulder_only:
-            if not in_padded:
-                dropped["outside_window"] = dropped.get("outside_window", 0) + 1
-                continue
-            if in_season:
-                dropped["in_season"] = dropped.get("in_season", 0) + 1
-                continue
-        else:
-            if not in_padded:
-                dropped["outside_window"] = dropped.get("outside_window", 0) + 1
-                continue
-
-        if args.include_debug_columns:
-            row["pheno_start_doy"] = str(pheno_start)
-            row["pheno_end_doy"] = str(pheno_end)
-            row["capture_doy"] = str(capture_doy)
-
-        output_rows.append(row)
-        kept += 1
-
-    utils.write_csv(output_rows, args.output)
-    logger.info(f"Filtered metadata saved: {args.output} ({kept}/{total} kept)")
-
-    for reason, count in sorted(dropped.items()):
-        logger.info(f"  Dropped ({reason}): {count}")
-
 
 def main():
     parser = argparse.ArgumentParser(
@@ -410,7 +275,6 @@ def main():
 Examples:
   %(prog)s tif --csv results.csv --output-dir tifs
   %(prog)s jpeg --source-metadata tif_metadata.csv --jpeg-folder jpegs
-  %(prog)s filter --selected selected.csv --metadata tif_metadata.csv --phenology phenology.csv
         """,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -454,49 +318,6 @@ Examples:
         action="store_true",
         help="Process smallest files first",
     )
-    p_jpeg.add_argument(
-        "--batch-size", type=int, default=0, help="Split output into batches"
-    )
-
-    p_filter = subparsers.add_parser(
-        "filter", help="Filter metadata by selection/phenology"
-    )
-    p_filter.add_argument(
-        "--selected", default="selected_stripped.csv", help="Selected filenames"
-    )
-    p_filter.add_argument(
-        "--metadata", default="tif_metadata.csv", help="Input metadata CSV"
-    )
-    p_filter.add_argument(
-        "--phenology", default="tif_phenology.csv", help="Phenology data CSV"
-    )
-    p_filter.add_argument(
-        "--output", default="tif_metadata_filtered.csv", help="Output CSV path"
-    )
-    p_filter.add_argument(
-        "--pad-days", type=int, default=0, help="Expand phenology window"
-    )
-    p_filter.add_argument(
-        "--shoulder-only", action="store_true", help="Keep only shoulder season"
-    )
-    p_filter.add_argument(
-        "--include-debug-columns",
-        action="store_true",
-        default=True,
-        help="Add debug columns",
-    )
-    p_filter.add_argument(
-        "--min-pixels",
-        type=int,
-        default=None,
-        help="Minimum pixel count (height x width)",
-    )
-    p_filter.add_argument(
-        "--max-pixels",
-        type=int,
-        default=None,
-        help="Maximum pixel count (height x width)",
-    )
 
     args = parser.parse_args()
 
@@ -504,8 +325,6 @@ Examples:
         cmd_tif(args)
     elif args.command == "jpeg":
         cmd_jpeg(args)
-    elif args.command == "filter":
-        cmd_filter(args)
 
 
 if __name__ == "__main__":

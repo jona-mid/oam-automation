@@ -90,17 +90,6 @@ def norm_filename(v: Any) -> str:
     return str(v).strip().lower()
 
 
-def load_selected_filenames(path: str) -> Set[str]:
-    """Load set of filenames from a text file (one per line)."""
-    selected: Set[str] = set()
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            name = norm_filename(line)
-            if name:
-                selected.add(name)
-    return selected
-
-
 def parse_bool(v: Any) -> bool:
     """Parse boolean value from various formats."""
     if isinstance(v, bool):
@@ -348,14 +337,6 @@ def match_tif_to_csv(
             return row
 
     return None
-
-
-def batched_output_path(output_csv: str, batch_index: int) -> str:
-    """Generate batched output path like *_batch001.csv."""
-    p = Path(output_csv)
-    stem = p.stem
-    suffix = p.suffix or ".csv"
-    return str(p.with_name(f"{stem}_batch{batch_index:03d}{suffix}"))
 
 
 def parse_args(description: str) -> "argparse.ArgumentParser":
