@@ -316,28 +316,33 @@ class TestPrepareCandidates:
     def test_server_check_skips_existing(self, tmp_path, monkeypatch):
         (tmp_path / "tifs").mkdir()
         (tmp_path / "tifs" / "a.tif").write_bytes(b"x")
-        monkeypatch.setattr(deadtrees_seam, "file_exists_on_platform", lambda name: True)
+        monkeypatch.setattr(deadtrees_seam, "file_names_on_platform", lambda names: set(names))
         gate = pd.DataFrame([self._gate_row("a.tif")])
         prep = oam_weekly.prepare_candidates(gate, set(), tmp_path, server_check=True)
         assert prep.candidates == 0
         assert prep.specs == []
 
-    def test_server_check_failure_falls_back_for_remaining(self, tmp_path, monkeypatch):
+    def test_server_check_skips_only_names_on_the_platform(self, tmp_path, monkeypatch):
         (tmp_path / "tifs").mkdir()
         for name in ("a.tif", "b.tif"):
             (tmp_path / "tifs" / name).write_bytes(b"x")
-        calls = {"n": 0}
+        monkeypatch.setattr(deadtrees_seam, "file_names_on_platform", lambda names: {"b.tif"})
+        gate = pd.DataFrame([self._gate_row("a.tif"), self._gate_row("B.TIF")])
+        prep = oam_weekly.prepare_candidates(gate, set(), tmp_path, server_check=True)
+        assert [spec.filename for spec in prep.specs] == ["a.tif"]
 
-        def flaky(name):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return False
+    def test_server_check_failure_falls_back_to_unchecked(self, tmp_path, monkeypatch):
+        (tmp_path / "tifs").mkdir()
+        for name in ("a.tif", "b.tif"):
+            (tmp_path / "tifs" / name).write_bytes(b"x")
+
+        def offline(names):
             raise ConnectionError("offline")
 
-        monkeypatch.setattr(deadtrees_seam, "file_exists_on_platform", flaky)
+        monkeypatch.setattr(deadtrees_seam, "file_names_on_platform", offline)
         gate = pd.DataFrame([self._gate_row("a.tif"), self._gate_row("b.tif")])
         prep = oam_weekly.prepare_candidates(gate, set(), tmp_path, server_check=True)
-        # a.tif was confirmed absent before the failure; b.tif falls back to unchecked
+        # The leg degrades to a warning; the ledger and hash legs still apply.
         assert [spec.filename for spec in prep.specs] == ["a.tif", "b.tif"]
 
     def test_platform_hash_match_skips(self, tmp_path, monkeypatch):
@@ -1018,7 +1023,7 @@ class TestMainRecoveryAndManifestChecks:
         )
         status = self._seed_chain(tmp_path)
         monkeypatch.setattr(oam_weekly, "run_pipeline", lambda *a, **k: None)
-        monkeypatch.setattr(oam_weekly.deadtrees_seam, "file_exists_on_platform", lambda name: False)
+        monkeypatch.setattr(oam_weekly.deadtrees_seam, "file_names_on_platform", lambda names: set())
         result = oam_weekly.main(self._argv(tmp_path, []))
         assert result == 0
         text = status.read_text(encoding="utf-8")

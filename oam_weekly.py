@@ -543,22 +543,24 @@ def prepare_candidates(
     ]
 
     if server_check and candidates:
-        kept = []
         try:
+            on_platform = deadtrees_seam.file_names_on_platform(
+                [normalize_filename(row["filename"]) for row in candidates]
+            )
+        except Exception as error:
+            print(
+                f"  ! Server-side check unavailable ({error}); "
+                f"skipping the check for {len(candidates)} candidates"
+            )
+        else:
+            kept = []
             for row in candidates:
                 filename = normalize_filename(row["filename"])
-                if deadtrees_seam.file_exists_on_platform(filename):
+                if filename in on_platform:
                     print(f"  = {filename} already on the platform, skipping")
                 else:
                     kept.append(row)
             candidates = kept
-        except Exception as error:
-            checked = len(kept)
-            print(
-                f"  ! Server-side check unavailable ({error}); "
-                f"skipping the check for the remaining {len(candidates) - checked} candidates"
-            )
-            candidates = kept + candidates[checked:]
 
     if candidates:
         # Content-hash leg: skip identical files the platform already has,

@@ -39,19 +39,27 @@ def _platform_api() -> Tuple[Any, Any, Any]:
     return DataCommands, use_client, settings
 
 
-def file_exists_on_platform(filename: str) -> bool:
-    """Server-side duplicate check: file_name in the datasets table (upload-guide pattern)."""
+def file_names_on_platform(filenames: List[str]) -> set:
+    """Server-side duplicate check: which of these file_names the datasets table already has.
+
+    One login and one query per HASH_QUERY_CHUNK names (the filter travels in
+    the URL); names are compared lowercase like the ledger.
+    """
+    if not filenames:
+        return set()
     DataCommands, use_client, settings = _platform_api()
-    dc = DataCommands()
-    token = dc._ensure_auth()
+    token = DataCommands()._ensure_auth()
+    found = set()
     with use_client(token) as client:
-        response = (
-            client.table(settings.datasets_table)
-            .select("id")
-            .eq("file_name", filename)
-            .execute()
-        )
-        return len(response.data) > 0
+        for start in range(0, len(filenames), HASH_QUERY_CHUNK):
+            response = (
+                client.table(settings.datasets_table)
+                .select("file_name")
+                .in_("file_name", filenames[start : start + HASH_QUERY_CHUNK])
+                .execute()
+            )
+            found.update(str(row["file_name"]).strip().lower() for row in response.data if row.get("file_name"))
+    return found
 
 
 def file_hash(path: Path) -> str:
