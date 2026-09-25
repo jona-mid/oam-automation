@@ -31,22 +31,31 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 Image.MAX_IMAGE_PIXELS = None
-PROMPT_VERSION = "phenology-v3"
-PROMPT = """You are classifying visible TREE-CANOPY phenology in one aerial image.
-Judge only visible woody tree crowns. Do not infer date, location, season,
-platform, metadata, or MODIS. Crops, grass, and other non-tree vegetation never
-establish a tree-canopy leaf state.
+PROMPT_VERSION = "phenology-v6"
+PROMPT = """You are checking one aerial image for a dead-tree mapping dataset.
+Judge only what is visible. You are not told the image's date or location,
+so do not guess them.
+
+Decide whether the trees are in their growing-season state, based on woody
+tree crowns. Snow, frost, or dormant brown ground cover can support a
+leaf-off judgement, but crops or grass alone never decide it.
 
 Return JSON only with exactly these fields:
 - tree_canopy_leaf_state: leaf_on, not_leaf_on, or not_assessable
 - visual_cue: 3 to 12 words describing visible evidence
 
 Definitions:
-- leaf_on: clearly green, foliated tree canopy, with no obvious autumn colouring.
-- not_leaf_on: visible autumn-coloured, brown, sparse, or bare/leafless tree
-  crowns.
-- not_assessable: tree canopy is absent, too small, obscured, or cannot be
-  judged reliably.
+- leaf_on: the living tree canopy is green and foliated. Dead, dying, or
+  bare crowns among green crowns are expected and still leaf_on, even when
+  they are numerous.
+- not_leaf_on: the stand as a whole looks seasonally leaf-off: most
+  deciduous crowns are bare, autumn-coloured, or not yet leafed out, and
+  the surviving vegetation looks dormant too (brown undergrowth or ground
+  cover, snow, frost, or dry-season leaf drop).
+- not_assessable: the image cannot support a judgement: little or no tree
+  canopy (e.g. buildings, fields, grassland, marsh), canopy too small to see,
+  or poor image quality (blurred, heavy stitching artefacts, clouds or haze,
+  mostly no-data).
 """
 
 MANIFEST_FIELDS = [
@@ -157,16 +166,37 @@ def jpeg_dimensions_from_header(path: Path) -> tuple[int, int]:
             handle.seek(segment_length - 2, io.SEEK_CUR)
 
 
+MIN_IMAGE_SHARE = 0.10  # below this share of real (non-black, non-white) pixels the frame is mostly no-data
+
+
+def image_share(path: Path) -> float:
+    """Share of pixels that are neither no-data black nor no-data white, from a reduced decode."""
+    with Image.open(path) as image:
+        image.draft("RGB", (512, 512))
+        pixels = image.convert("RGB")
+        pixels.thumbnail((512, 512))
+        import numpy as np
+
+        data = np.asarray(pixels)
+        empty = (data.max(axis=-1) <= 8) | (data.min(axis=-1) >= 247)
+        return float(1 - empty.mean())
+
+
 def preview_info(path: Path | None, minimum_long_edge: int) -> tuple[str, int | None, int | None, int | None, int | None]:
-    """Read preview dimensions and bytes without decoding image pixels."""
+    """Read preview dimensions and bytes; decode a reduced copy only to reject mostly-empty frames."""
     try:
         if path is None or not path.is_file() or path.stat().st_size == 0:
             return "missing_or_zero", None, None, None, None
         file_bytes = path.stat().st_size
         width, height = jpeg_dimensions_from_header(path)
         long_edge = max(width, height)
-        return ("eligible" if long_edge >= minimum_long_edge else "too_small",
-                width, height, long_edge, file_bytes)
+        if long_edge < minimum_long_edge:
+            return "too_small", width, height, long_edge, file_bytes
+        # The VLM only sometimes flags frames that are almost all no-data, so
+        # decide those deterministically and never send them.
+        if image_share(path) < MIN_IMAGE_SHARE:
+            return "mostly_nodata", width, height, long_edge, file_bytes
+        return "eligible", width, height, long_edge, file_bytes
     except Exception:
         return "unreadable", None, None, None, None
 
@@ -242,6 +272,9 @@ def image_data(path: Path, max_side: int = 2048) -> tuple[str, str, int]:
 def extract_json(content: str) -> dict[str, object]:
     content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.IGNORECASE)
     parsed = json.loads(content)
+    # Gemini occasionally wraps the object in a one-element list.
+    if isinstance(parsed, list) and len(parsed) == 1:
+        parsed = parsed[0]
     if not isinstance(parsed, dict):
         raise ValueError("model response is not a JSON object")
     return parsed
