@@ -14,7 +14,7 @@ python3 -m venv .venv
 cp .env.example .env   # fill in
 ```
 
-- `OPENROUTER_API_KEY`: VLM check with `google/gemini-3-flash-preview`, ~$0.0008 per in-season image. Use a key with a credit limit.
+- `OPENROUTER_API_KEY`: VLM check with `google/gemini-3-flash-preview`, ~$0.0008 per in-season image. Use a key with a credit limit. To use Requesty (or another OpenAI-compatible provider) instead, set `VLM_ENDPOINT` and `VLM_API_KEY` (see `.env.example`).
 - `OAM_UPLOADED_CSV`: the upload ledger, currently `/mnt/gsdata/projects/deadtrees/data_openaerialmap/metadata_uploaded.csv`. Keep exactly one.
 - The rest are the platform account and endpoints for `deadtrees-cli`.
 
