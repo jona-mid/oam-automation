@@ -4,3 +4,4 @@ __pycache__/
 .env
 .deadtrees-upload-session.json
 runs/
+runs_aerialmodel/

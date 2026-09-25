@@ -48,6 +48,20 @@ scrape -> filter -> phenology -> thumbnails/TIFFs -> JPEGs -> VLM check -> uploa
 - **Earth Engine forest filter:** kept but off; the weekly run never enables it (see `pipeline.py --forest-min/--forest-max`).
 - **Tests:** `pip install pytest && python -m pytest` (no network or credentials needed).
 
+## AerialModel source
+
+`aerialmodel_weekly.py` does the same for [aerialmodel.com](https://www.aerialmodel.com): it screens new projects from public data (the ODM `stats.json` gives the capture date from the photos' EXIF and the GSD), downloads only in-season orthophotos with a GSD of 0.3–10 cm (login via `AERIALMODEL_EMAIL`/`AERIALMODEL_PASSWORD`), then runs the same VLM check, duplicate checks and upload. Uploads are CC BY, private, author `aerialmodel.com`; the site's policies grant no license to third parties, so this rests on our own licensing decision.
+
+```bash
+.venv/bin/python aerialmodel_weekly.py --after-id 39083 --before-id 40500   # backlog in chunks, first run
+.venv/bin/python aerialmodel_weekly.py                                      # weekly after that
+```
+
+- Project IDs increase over time; `runs_aerialmodel/last_run.txt` keeps `last_project_id` with the same hold-on-failure rules as OAM. Projects without a model yet are re-checked for 4 weeks (`pending_ids.csv`).
+- Each backlog chunk needs a fresh `--output-dir`; run the chunks in order so the chain moves up with them.
+- `--screen-only` runs just the public screening and lists what would be downloaded; `--dry-run` runs every step except the upload and lists the candidates.
+- For the weekly timer, copy the OAM service and timer below with `aerialmodel_weekly.py`.
+
 ## Deploy example
 
 `/etc/systemd/system/oam-weekly.service`:
