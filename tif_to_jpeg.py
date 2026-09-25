@@ -49,6 +49,11 @@ def _convert_tif_to_20cm_jpeg(tif_path: str, output_path: str, target_meter_crs:
     Uses GDAL's internal tiling via WarpedVRT for memory-efficient processing
     of large rasters. Processes in windows to avoid loading entire image.
     """
+    # Write to a temporary name and rename on success: a failed or
+    # interrupted conversion must not leave a black/partial JPEG behind,
+    # which a resumed run would take as done.
+    final = Path(output_path)
+    partial = final.with_name(final.stem + ".partial.jpeg")
     try:
         with rasterio.open(tif_path) as src:
             src_crs = src.crs
@@ -97,7 +102,7 @@ def _convert_tif_to_20cm_jpeg(tif_path: str, output_path: str, target_meter_crs:
                     "crs": dst_crs,
                 }
 
-                with rasterio.open(output_path, "w", **kwargs) as dst:
+                with rasterio.open(partial, "w", **kwargs) as dst:
                     # Process in windows/blocks - GDAL handles I/O efficiently
                     for _, window in vrt.block_windows(1):
                         # Read window from VRT (GDAL does the resampling)
@@ -112,9 +117,16 @@ def _convert_tif_to_20cm_jpeg(tif_path: str, output_path: str, target_meter_crs:
                         # Write window to output
                         dst.write(data, window=window)
 
+            partial.replace(final)
+            partial_aux = partial.with_name(partial.name + ".aux.xml")
+            if partial_aux.exists():
+                partial_aux.replace(final.with_name(final.name + ".aux.xml"))
             return True, Path(tif_path).name, None
 
     except Exception as e:
+        for leftover in (partial, partial.with_name(partial.name + ".aux.xml")):
+            if leftover.exists():
+                leftover.unlink()
         return False, Path(tif_path).name, str(e)
 
 
