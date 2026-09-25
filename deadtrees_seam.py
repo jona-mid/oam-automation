@@ -15,6 +15,7 @@ ENV_PATH = Path(__file__).resolve().parent / ".env"
 
 TASK_TYPES = ["geotiff", "metadata", "cog", "thumbnail", "deadwood_v1", "treecover_v1"]
 PROCESS_PRIORITY = 2
+HASH_QUERY_CHUNK = 50
 
 # OAM property_license strings -> deadtrees LicenseEnum values. Unknown values fail closed.
 OAM_LICENSE_MAP = {
@@ -71,14 +72,21 @@ def file_hashes_on_platform(hashes: List[str]) -> Any:
     if not hashes:
         return {}
     _, use_client, settings = _platform_api()
+    found = {}
+    # The filter travels in the URL; one query for hundreds of hashes fails
+    # with HTTP 414, so query in chunks.
     with use_client(os.environ["SUPABASE_KEY"]) as client:
-        response = (
-            client.table(settings.orthos_table)
-            .select("dataset_id,sha256")
-            .in_("sha256", hashes)
-            .execute()
-        )
-    return {row["sha256"]: row["dataset_id"] for row in response.data if row.get("sha256")}
+        for start in range(0, len(hashes), HASH_QUERY_CHUNK):
+            response = (
+                client.table(settings.orthos_table)
+                .select("dataset_id,sha256")
+                .in_("sha256", hashes[start : start + HASH_QUERY_CHUNK])
+                .execute()
+            )
+            found.update(
+                {row["sha256"]: row["dataset_id"] for row in response.data if row.get("sha256")}
+            )
+    return found
 
 
 def upload_and_process(
