@@ -284,3 +284,33 @@ class TestMain:
         assert weekly.main(self.argv(tmp_path, "--after-id", "100", "--dry-run")) == 0
         assert uploads == []
         assert "exit: dry-run" in (tmp_path / "runs" / "last_run.txt").read_text(encoding="utf-8")
+
+
+class TestMergedWithMain:
+    def test_vlm_settings_follow_env(self, monkeypatch):
+        monkeypatch.setenv("VLM_ENDPOINT", "https://router.requesty.ai/v1/chat/completions")
+        monkeypatch.setenv("VLM_MODEL", "vertex/gemini-3-flash-preview")
+        monkeypatch.setenv("VLM_API_KEY", "x")
+        assert weekly.vlm_settings() == (
+            "https://router.requesty.ai/v1/chat/completions", "vertex/gemini-3-flash-preview", "VLM_API_KEY"
+        )
+
+    def test_vlm_settings_default_to_openrouter(self, monkeypatch):
+        for name in ("VLM_ENDPOINT", "VLM_MODEL", "VLM_API_KEY"):
+            monkeypatch.delenv(name, raising=False)
+        endpoint, model, key_env = weekly.vlm_settings()
+        assert "openrouter.ai" in endpoint and key_env == "OPENROUTER_API_KEY"
+
+    def test_tiff_processed_before_capture_is_rejected(self, tmp_path):
+        import numpy as np
+        import rasterio
+        from rasterio.transform import from_origin
+
+        tif = tmp_path / "aerialmodel_1.tif"
+        with rasterio.open(tif, "w", driver="GTiff", width=4, height=4, count=3, dtype="uint8",
+                           crs="EPSG:4326", transform=from_origin(0, 1, 0.1, 0.1)) as dst:
+            dst.write(np.zeros((3, 4, 4), dtype="uint8"))
+            dst.update_tags(TIFFTAG_DATETIME="2025:01:01 10:00:00")
+        row = pd.Series({"project_id": "1", "capture_date": "2026-09-19", "model_url": ""})
+        with pytest.raises(ValueError, match="processed on 2025-01-01"):
+            weekly.build_aerialmodel_kwargs(row, date(2026, 9, 25), tif)

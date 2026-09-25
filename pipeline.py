@@ -4,6 +4,7 @@
 import argparse
 import csv
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -30,7 +31,8 @@ def csv_rows(path):
         return list(csv.DictReader(handle))
 
 
-def run_vlm_stages(output, tifs, jpegs, pheno_csv, tif_metadata, endpoint, model, workers):
+def run_vlm_stages(output, tifs, jpegs, pheno_csv, tif_metadata, endpoint, model, workers,
+                   api_key_env="OPENROUTER_API_KEY"):
     """Audit manifest -> VLM review -> report into `output`; returns the manifest stage entries.
 
     Skipped when metadata/phenology_report.csv exists. Fails (SystemExit) when
@@ -45,7 +47,7 @@ def run_vlm_stages(output, tifs, jpegs, pheno_csv, tif_metadata, endpoint, model
         if not audit_manifest_csv.exists():
             run("aerial_phenology_audit.py", "manifest", "--source", tifs, "--jpegs", jpegs, "--phenology", pheno_csv, "--metadata", tif_metadata, "--output", audit_manifest_csv, cwd=output)
 
-        run("aerial_phenology_audit.py", "phenology-run", "--manifest", audit_manifest_csv, "--attempts", vlm_attempts, "--endpoint", endpoint, "--model", model, "--workers", workers, "--priorities", "in_season", cwd=output)
+        run("aerial_phenology_audit.py", "phenology-run", "--manifest", audit_manifest_csv, "--attempts", vlm_attempts, "--endpoint", endpoint, "--model", model, "--api-key-env", api_key_env, "--workers", workers, "--priorities", "in_season", cwd=output)
 
         if vlm_images.exists() and any(vlm_images.iterdir()):
             shutil.rmtree(vlm_images)
@@ -65,7 +67,7 @@ def run_vlm_stages(output, tifs, jpegs, pheno_csv, tif_metadata, endpoint, model
             errors = sorted({row.get("http_status") or row.get("error") or row.get("review_status") for row in unreviewed})
             raise SystemExit(
                 f"VLM review failed for {len(unreviewed)} in-season image(s) (errors: {', '.join(map(str, errors))[:300]}); "
-                f"check OPENROUTER_API_KEY and credits, then re-run into {output} to retry"
+                f"check {api_key_env} and credits at {endpoint}, then re-run into {output} to retry"
             )
 
     return {
@@ -87,8 +89,12 @@ def main():
     parser.add_argument("--thumbnail-workers", type=int, default=8)
     parser.add_argument("--tif-workers", type=int, default=8)
     parser.add_argument("--jpeg-workers", type=int, default=8)
-    parser.add_argument("--vlm-endpoint", default="https://openrouter.ai/api/v1/chat/completions")
-    parser.add_argument("--vlm-model", default="google/gemini-3-flash-preview")
+    # Any OpenAI-compatible chat-completions endpoint works (OpenRouter by
+    # default, e.g. Requesty via .env). The key flag takes the name of the
+    # environment variable, so the key itself never lands in the manifest.
+    parser.add_argument("--vlm-endpoint", default=os.environ.get("VLM_ENDPOINT") or "https://openrouter.ai/api/v1/chat/completions")
+    parser.add_argument("--vlm-model", default=os.environ.get("VLM_MODEL") or "google/gemini-3-flash-preview")
+    parser.add_argument("--vlm-api-key-env", default="VLM_API_KEY" if os.environ.get("VLM_API_KEY") else "OPENROUTER_API_KEY")
     parser.add_argument("--vlm-workers", type=int, default=4)
     args = parser.parse_args()
 
@@ -179,7 +185,8 @@ def main():
     manifest["stages"]["metadata"] = {"tif": str(tif_metadata), "jpeg": str(jpeg_metadata)}
 
     manifest["stages"].update(
-        run_vlm_stages(output, tifs, jpegs, pheno_csv, tif_metadata, args.vlm_endpoint, args.vlm_model, args.vlm_workers)
+        run_vlm_stages(output, tifs, jpegs, pheno_csv, tif_metadata, args.vlm_endpoint, args.vlm_model,
+                       args.vlm_workers, args.vlm_api_key_env)
     )
     return finish()
 

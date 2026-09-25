@@ -190,6 +190,46 @@ class TestBuildUploadKwargs:
             )
 
 
+class TestTitleDates:
+    def test_month_name_dates(self):
+        assert oam_weekly.title_dates("Lowes  New Paltz May 16, 2022") == [date(2022, 5, 16)]
+        assert oam_weekly.title_dates("highland rail trail june 30 2024") == [date(2024, 6, 30)]
+        assert oam_weekly.title_dates("Flight on 3rd March 2024") == [date(2024, 3, 3)]
+
+    def test_numeric_dates_give_both_readings(self):
+        assert set(oam_weekly.title_dates("AIT Golf Course - 7/11/2015")) == {date(2015, 7, 11), date(2015, 11, 7)}
+        assert oam_weekly.title_dates("Neversink 6. 13. 2023") == [date(2023, 6, 13)]
+        assert oam_weekly.title_dates("Survey 2026-06-01") == [date(2026, 6, 1)]
+
+    def test_month_and_year_only(self):
+        assert oam_weekly.title_dates("Flight March 2024") == [date(2024, 3, 15)]
+
+    def test_titles_without_dates(self):
+        for title in ["53646_33408sal_pembuangan_handil", "Chattogram UAV 55", "Plan 2030", "", None, float("nan")]:
+            assert oam_weekly.title_dates(title) == []
+
+
+class TestTitleDateCheck:
+    def _row(self, **overrides):
+        return TestBuildUploadKwargs()._row(**overrides)
+
+    def test_contradicting_title_date_is_rejected(self):
+        row = self._row(acquisition_date="2026-07-08", title="Lowes  New Paltz May 16, 2022")
+        with pytest.raises(ValueError, match="title date 2022-05-16 contradicts capture date 2026-07-08"):
+            oam_weekly.build_upload_kwargs(row, date(2026, 9, 21))
+
+    def test_matching_title_date_passes(self):
+        row = self._row(acquisition_date="2022-01-03", title="Mason Road - 1/3/2022")
+        assert oam_weekly.build_upload_kwargs(row, date(2026, 9, 21))["acquisition_year"] == 2022
+
+    def test_small_offset_within_tolerance_passes(self):
+        row = self._row(acquisition_date="2026-09-11", title="Survey 2026-08-20")
+        assert oam_weekly.build_upload_kwargs(row, date(2026, 9, 21))["acquisition_day"] == 11
+
+    def test_missing_title_passes(self):
+        assert oam_weekly.build_upload_kwargs(self._row(), date(2026, 9, 21))["acquisition_month"] == 9
+
+
 class TestSeamSignature:
     def test_upload_kwargs_match_seam_signature(self):
         """The wrapper spreads build_upload_kwargs into the seam; keys must match its parameters."""
@@ -276,28 +316,33 @@ class TestPrepareCandidates:
     def test_server_check_skips_existing(self, tmp_path, monkeypatch):
         (tmp_path / "tifs").mkdir()
         (tmp_path / "tifs" / "a.tif").write_bytes(b"x")
-        monkeypatch.setattr(deadtrees_seam, "file_exists_on_platform", lambda name: True)
+        monkeypatch.setattr(deadtrees_seam, "file_names_on_platform", lambda names: set(names))
         gate = pd.DataFrame([self._gate_row("a.tif")])
         prep = oam_weekly.prepare_candidates(gate, set(), tmp_path, server_check=True)
         assert prep.candidates == 0
         assert prep.specs == []
 
-    def test_server_check_failure_falls_back_for_remaining(self, tmp_path, monkeypatch):
+    def test_server_check_skips_only_names_on_the_platform(self, tmp_path, monkeypatch):
         (tmp_path / "tifs").mkdir()
         for name in ("a.tif", "b.tif"):
             (tmp_path / "tifs" / name).write_bytes(b"x")
-        calls = {"n": 0}
+        monkeypatch.setattr(deadtrees_seam, "file_names_on_platform", lambda names: {"b.tif"})
+        gate = pd.DataFrame([self._gate_row("a.tif"), self._gate_row("B.TIF")])
+        prep = oam_weekly.prepare_candidates(gate, set(), tmp_path, server_check=True)
+        assert [spec.filename for spec in prep.specs] == ["a.tif"]
 
-        def flaky(name):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return False
+    def test_server_check_failure_falls_back_to_unchecked(self, tmp_path, monkeypatch):
+        (tmp_path / "tifs").mkdir()
+        for name in ("a.tif", "b.tif"):
+            (tmp_path / "tifs" / name).write_bytes(b"x")
+
+        def offline(names):
             raise ConnectionError("offline")
 
-        monkeypatch.setattr(deadtrees_seam, "file_exists_on_platform", flaky)
+        monkeypatch.setattr(deadtrees_seam, "file_names_on_platform", offline)
         gate = pd.DataFrame([self._gate_row("a.tif"), self._gate_row("b.tif")])
         prep = oam_weekly.prepare_candidates(gate, set(), tmp_path, server_check=True)
-        # a.tif was confirmed absent before the failure; b.tif falls back to unchecked
+        # The leg degrades to a warning; the ledger and hash legs still apply.
         assert [spec.filename for spec in prep.specs] == ["a.tif", "b.tif"]
 
     def test_platform_hash_match_skips(self, tmp_path, monkeypatch):
@@ -913,6 +958,26 @@ class TestMainRecoveryAndManifestChecks:
         assert "failed: 1" in text
         assert "next scheduled run retries it" in capsys.readouterr().out
 
+    def test_max_uploads_uploads_a_batch_and_holds_chain(self, tmp_path, monkeypatch, capsys):
+        self._seed_dir(tmp_path, {"uploaded_after_date": "2026-09-06", "uploaded_before_date": "None"})
+        status = self._seed_chain(tmp_path)
+        kwargs = {"authors": ["x"], "license": "CC BY", "platform": "drone", "data_access": "public",
+                  "acquisition_year": 2026, "acquisition_month": 9, "acquisition_day": 1,
+                  "additional_information": "x", "citation_doi": None}
+        specs = [oam_weekly.UploadSpec(f"{n}.tif", tmp_path / f"{n}.tif", kwargs) for n in "abc"]
+        self._stub_pipeline(monkeypatch, oam_weekly.Preparation(3, specs, 0))
+        uploaded = []
+        monkeypatch.setattr(oam_weekly.deadtrees_seam, "upload_and_process",
+                            lambda tif_path, **kw: uploaded.append(tif_path.name) or 1)
+        result = oam_weekly.main(self._argv(tmp_path, ["--max-uploads", "2"]))
+        assert result == 0
+        assert uploaded == ["a.tif", "b.tif"]
+        text = status.read_text(encoding="utf-8")
+        assert "exit: partial" in text
+        # The third candidate is still pending, so the window must not move.
+        assert "scrape_uploaded_at: 2026-09-06" in text
+        assert "1 candidate(s) left" in capsys.readouterr().out
+
     def test_aborted_run_holds_chain(self, tmp_path, monkeypatch):
         self._seed_dir(tmp_path, {"uploaded_after_date": "2026-09-06", "uploaded_before_date": "None"})
         status = self._seed_chain(tmp_path)
@@ -978,7 +1043,7 @@ class TestMainRecoveryAndManifestChecks:
         )
         status = self._seed_chain(tmp_path)
         monkeypatch.setattr(oam_weekly, "run_pipeline", lambda *a, **k: None)
-        monkeypatch.setattr(oam_weekly.deadtrees_seam, "file_exists_on_platform", lambda name: False)
+        monkeypatch.setattr(oam_weekly.deadtrees_seam, "file_names_on_platform", lambda names: set())
         result = oam_weekly.main(self._argv(tmp_path, []))
         assert result == 0
         text = status.read_text(encoding="utf-8")
@@ -1015,3 +1080,86 @@ class TestParseArgs:
     def test_uploaded_before_parses_when_given(self):
         args = oam_weekly.parse_args(["--uploaded-csv", "ledger.csv", "--uploaded-before", "2026-09-07"])
         assert args.uploaded_before == "2026-09-07"
+
+
+class TestCaptureDateChecks:
+    def _row(self, **overrides):
+        return TestBuildUploadKwargs()._row(**overrides)
+
+    def test_compact_title_date_contradiction_is_rejected(self):
+        row = self._row(acquisition_date="2026-01-24", title="WattleBay_260710")
+        with pytest.raises(ValueError, match="title date 2026-07-10"):
+            oam_weekly.build_upload_kwargs(row, date(2026, 9, 21))
+
+    def test_space_separated_title_date(self):
+        assert oam_weekly.title_dates("Lake Helen 9 9 2021") == [date(2021, 9, 9)]
+
+    def test_numbers_that_are_not_dates(self):
+        for title in ["53646_33408sal_pembuangan", "orthomosaic_123456", "JAM-HM-SEL-AW-52-1", "Plan-2030"]:
+            assert oam_weekly.title_dates(title) == []
+
+    def test_placeholder_capture_date_is_rejected(self):
+        row = self._row(acquisition_date="2016-01-01", acquisition_start="2016-01-01T08:00:00.000Z")
+        with pytest.raises(ValueError, match="placeholder"):
+            oam_weekly.build_upload_kwargs(row, date(2026, 9, 21))
+
+    def test_placeholder_east_of_greenwich(self):
+        assert oam_weekly.is_placeholder_timestamp("2013-12-31T16:00:00.000Z")
+
+    def test_real_time_on_january_first_is_not_a_placeholder(self):
+        assert not oam_weekly.is_placeholder_timestamp("2026-01-01T09:13:22.000Z")
+        assert not oam_weekly.is_placeholder_timestamp("2026-07-08T04:00:00.000Z")
+
+    def test_capture_after_upload_is_rejected(self):
+        row = self._row(acquisition_date="2026-09-11", uploaded_at="2026-08-01T10:00:00.000Z")
+        with pytest.raises(ValueError, match="after the OAM upload"):
+            oam_weekly.build_upload_kwargs(row, date(2026, 9, 21))
+
+    def test_capture_on_upload_day_passes(self):
+        row = self._row(acquisition_date="2026-09-11", uploaded_at="2026-09-11T22:00:00.000Z")
+        assert oam_weekly.build_upload_kwargs(row, date(2026, 9, 21))["acquisition_day"] == 11
+
+    def _tif(self, path, datetime_tag):
+        import numpy as np
+        import rasterio
+        from rasterio.transform import from_origin
+
+        with rasterio.open(path, "w", driver="GTiff", width=4, height=4, count=3, dtype="uint8",
+                           crs="EPSG:4326", transform=from_origin(0, 1, 0.1, 0.1)) as dst:
+            dst.write(np.zeros((3, 4, 4), dtype="uint8"))
+            if datetime_tag:
+                dst.update_tags(TIFFTAG_DATETIME=datetime_tag)
+        return path
+
+    def test_tiff_processed_before_capture_is_rejected(self, tmp_path):
+        tif = self._tif(tmp_path / "a.tif", "2025:02:27 10:00:00")
+        with pytest.raises(ValueError, match="processed on 2025-02-27"):
+            oam_weekly.build_upload_kwargs(self._row(acquisition_date="2026-06-19"), date(2026, 9, 21), tif)
+
+    def test_tiff_processed_after_capture_passes(self, tmp_path):
+        tif = self._tif(tmp_path / "b.tif", "2026:10:02 10:00:00")
+        assert oam_weekly.build_upload_kwargs(self._row(), date(2026, 9, 21), tif)["acquisition_month"] == 9
+
+    def test_tiff_without_date_tag_passes(self, tmp_path):
+        tif = self._tif(tmp_path / "c.tif", None)
+        assert oam_weekly.build_upload_kwargs(self._row(), date(2026, 9, 21), tif)["acquisition_month"] == 9
+
+
+class TestTitleDateRefinements:
+    def test_six_digits_also_read_as_ddmmyy(self):
+        assert date(2025, 1, 22) in oam_weekly.title_dates("3_NSD_B1_Desp_220125")
+        oam_weekly.check_title_date("3_NSD_B1_Desp_220125", date(2025, 1, 25))
+
+    def test_event_date_before_flight_passes(self):
+        oam_weekly.check_title_date("Incendio Chingaza Febrero 2025", date(2025, 7, 21))
+
+    def test_event_word_does_not_excuse_a_flight_listed_before_the_event(self):
+        with pytest.raises(ValueError):
+            oam_weekly.check_title_date("Hurricane Melissa 2025-10-28", date(2025, 6, 1))
+
+    def test_title_dates_after_the_upload_are_ignored(self):
+        oam_weekly.check_title_date("Min-yr-Awel October 2025", date(2024, 9, 30), date(2025, 5, 22))
+
+    def test_real_contradiction_still_rejected_with_upload_known(self):
+        with pytest.raises(ValueError):
+            oam_weekly.check_title_date("Lowes  New Paltz May 16, 2022", date(2026, 7, 8), date(2026, 7, 8))

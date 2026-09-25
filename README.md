@@ -14,7 +14,7 @@ python3 -m venv .venv
 cp .env.example .env   # fill in
 ```
 
-- `OPENROUTER_API_KEY`: VLM check with `google/gemini-3-flash-preview`, ~$0.0008 per in-season image. Use a key with a credit limit.
+- `OPENROUTER_API_KEY`: VLM check with `google/gemini-3-flash-preview`, ~$0.0008 per in-season image. Use a key with a credit limit. To use Requesty (or another OpenAI-compatible provider) instead, set `VLM_ENDPOINT` and `VLM_API_KEY` (see `.env.example`).
 - `OAM_UPLOADED_CSV`: the upload ledger, currently `/mnt/gsdata/projects/deadtrees/data_openaerialmap/metadata_uploaded.csv`. Keep exactly one.
 - The rest are the platform account and endpoints for `deadtrees-cli`.
 
@@ -30,7 +30,7 @@ The first run needs the date of the last harvest. After that, each run continues
 - Each run writes a `runs/<date>/` folder (prune old ones); progress and errors go to stdout/stderr.
 - A failed run exits 1.
 
-Options: `--dry-run` lists upload candidates from an existing run folder without uploading. Re-running on the same day resumes `runs/<today>`; `--output-dir DIR` picks another folder. `--uploaded-after` / `--uploaded-before` run an ad-hoc date window (both inclusive; use a fresh `--output-dir`). `--skip-server-check` skips the platform filename check.
+Options: `--dry-run` lists upload candidates from an existing run folder without uploading. Re-running on the same day resumes `runs/<today>`; `--output-dir DIR` picks another folder. `--uploaded-after` / `--uploaded-before` run an ad-hoc date window (both inclusive; use a fresh `--output-dir`). `--skip-server-check` skips the platform filename check. `--max-uploads N` uploads at most N candidates; the rest follow on the next run with the same window.
 
 ## How it works
 
@@ -59,7 +59,7 @@ scrape -> filter -> phenology -> thumbnails/TIFFs -> JPEGs -> VLM check -> uploa
 
 - Project IDs increase over time; `runs_aerialmodel/last_run.txt` keeps `last_project_id` with the same hold-on-failure rules as OAM. Projects without a model yet are re-checked for 4 weeks (`pending_ids.csv`).
 - Each backlog chunk needs a fresh `--output-dir`; run the chunks in order so the chain moves up with them.
-- `--screen-only` runs just the public screening and lists what would be downloaded; `--dry-run` runs every step except the upload and lists the candidates.
+- `--screen-only` runs just the public screening and lists what would be downloaded; `--dry-run` runs every step except the upload and lists the candidates. `--max-uploads N` works as for OAM.
 - For the weekly timer, copy the OAM service and timer below with `aerialmodel_weekly.py`.
 
 ## Deploy example

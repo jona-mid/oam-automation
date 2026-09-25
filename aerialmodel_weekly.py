@@ -36,8 +36,6 @@ MAX_GSD_CM = 10.0
 MIN_GSD_CM = 0.3  # below this the ODM scale is broken (e.g. 0.002 cm on unscaled models)
 PAD_DAYS = 30
 PENDING_DAYS = 28
-VLM_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
-VLM_MODEL = "google/gemini-3-flash-preview"
 VLM_WORKERS = 4
 JPEG_WORKERS = 8
 
@@ -50,6 +48,14 @@ SCREEN_FIELDS = [
     "project_id", "filename", "name", "lat", "lng", "model_url", "storage_path",
     "capture_date", "gsd_cm", "pheno_start_doy", "pheno_end_doy", "pheno_season", "status",
 ]
+
+
+def vlm_settings():
+    """Endpoint, model and key variable from .env, like pipeline.py (default: OpenRouter)."""
+    endpoint = os.environ.get("VLM_ENDPOINT") or "https://openrouter.ai/api/v1/chat/completions"
+    model = os.environ.get("VLM_MODEL") or "google/gemini-3-flash-preview"
+    key_env = "VLM_API_KEY" if os.environ.get("VLM_API_KEY") else "OPENROUTER_API_KEY"
+    return endpoint, model, key_env
 
 
 def project_filename(project_id) -> str:
@@ -297,12 +303,15 @@ def load_gate(run_dir: Path) -> pd.DataFrame:
     return report[["filename"]].merge(screened, on="filename", how="inner")
 
 
-def build_aerialmodel_kwargs(row: pd.Series, run_date: date) -> dict:
-    """Upload kwargs for one gate row; fails closed on a missing capture date or project ID."""
+def build_aerialmodel_kwargs(row: pd.Series, run_date: date, tif_path: Optional[Path] = None) -> dict:
+    """Upload kwargs for one gate row; fails closed on a missing or contradicted capture date or project ID."""
     raw_date = row.get("capture_date")
     if pd.isna(raw_date) or not str(raw_date).strip():
         raise ValueError("missing capture_date")
     capture = date.fromisoformat(str(raw_date).strip())
+    # The capture date comes from the photos' EXIF; the TIFF's processing
+    # date still must not predate it.
+    oam_weekly.check_capture_date(row, capture, tif_path)
     project_id = str(row.get("project_id", "")).strip()
     if not project_id.isdigit():
         raise ValueError("missing project_id")
@@ -338,6 +347,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--screen-only", action="store_true", help="Catalog + screening only (public, no login, no downloads); prints what would be downloaded")
     parser.add_argument("--dry-run", action="store_true", help="Run every stage except the upload: list upload candidates; no uploads, no ledger appends, chain untouched")
     parser.add_argument("--skip-server-check", action="store_true", help="Skip the platform file_name duplicate check")
+    parser.add_argument("--max-uploads", type=int, default=None, help="Upload at most N candidates; the rest stay for the next run with the same window")
     args = parser.parse_args(argv)
     if args.uploaded_csv is None:
         env_value = os.environ.get("AERIALMODEL_UPLOADED_CSV", "").strip()
@@ -421,7 +431,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 pipeline.run("tif_to_jpeg.py", "--input-dir", tifs, "--output-dir", jpegs, "--workers", JPEG_WORKERS, cwd=run_dir)
             pheno_csv, tif_metadata = metadata / "phenology.csv", metadata / "tif_metadata.csv"
             write_audit_inputs(eligible, tifs, pheno_csv, tif_metadata)
-            pipeline.run_vlm_stages(run_dir, tifs, jpegs, pheno_csv, tif_metadata, VLM_ENDPOINT, VLM_MODEL, VLM_WORKERS)
+            endpoint, model, key_env = vlm_settings()
+            pipeline.run_vlm_stages(run_dir, tifs, jpegs, pheno_csv, tif_metadata, endpoint, model, VLM_WORKERS, key_env)
 
         gate = load_gate(run_dir)
         ledger = oam_weekly.load_ledger_filenames(args.uploaded_csv)
@@ -439,7 +450,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     print(f"      {key}: {value}")
             exit_status = "dry-run"
         else:
-            for spec in prep.specs:
+            batch = prep.specs if args.max_uploads is None else prep.specs[: max(args.max_uploads, 0)]
+            remaining = len(prep.specs) - len(batch)
+            for spec in batch:
                 try:
                     dataset_id = deadtrees_seam.upload_and_process(spec.tif_path, **spec.kwargs)
                 except Exception as error:
@@ -452,6 +465,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"Summary: {counts.candidates} candidates, {counts.uploaded} uploaded, "
                   f"{counts.failed} failed, {counts.rejected} rejected.")
             exit_status = "success" if counts.failed == 0 else "failed"
+            if remaining and exit_status == "success":
+                # Not a failure, but the window is not done: hold it like one.
+                exit_status = "partial"
+                print(f"  ! {remaining} candidate(s) left for the next run (--max-uploads {args.max_uploads})")
     except Exception as error:
         print(f"Run aborted: {error}")
         exit_status = "failed"
@@ -465,6 +482,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"  ! {warning}")
             if next_pending is not None:
                 write_pending(pending_file, next_pending)
+        elif exit_status == "partial" and after_id is not None:
+            chain_value = stored if stored is not None else after_id
         elif exit_status == "failed" and after_id is not None:
             chain_value = stored if stored is not None else after_id
             print(f"  ! run failed; the chain stays at project {chain_value}, so the next run retries this window "
@@ -483,7 +502,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "exit": exit_status,
             })
 
-    return 0 if exit_status in ("success", "dry-run") else 1
+    return 0 if exit_status in ("success", "dry-run", "partial") else 1
 
 
 if __name__ == "__main__":
