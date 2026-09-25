@@ -492,6 +492,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Skip the server-side duplicate check (diff leg 2)",
     )
     parser.add_argument(
+        "--max-uploads",
+        type=int,
+        default=None,
+        help="Upload at most N candidates; the rest stay for the next run with the same window",
+    )
+    parser.add_argument(
         "--uploaded-after",
         default=None,
         help="Scrape only OAM uploads on/after this date (YYYY-MM-DD); "
@@ -718,7 +724,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     print(f"      {key}: {value}")
             exit_status = "dry-run"
         else:
-            for spec in prep.specs:
+            batch = prep.specs if args.max_uploads is None else prep.specs[: max(args.max_uploads, 0)]
+            remaining = len(prep.specs) - len(batch)
+            for spec in batch:
                 try:
                     dataset_id = deadtrees_seam.upload_and_process(spec.tif_path, **spec.kwargs)
                 except Exception as error:
@@ -733,6 +741,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"{counts.failed} failed, {counts.rejected} rejected (bad metadata, not retried)."
             )
             exit_status = "success" if counts.failed == 0 else "failed"
+            if remaining and exit_status == "success":
+                # Not a failure, but the window is not done: hold it like one.
+                exit_status = "partial"
+                print(f"  ! {remaining} candidate(s) left for the next run (--max-uploads {args.max_uploads})")
     except Exception as error:
         print(f"Run aborted: {error}")
         exit_status = "failed"
@@ -749,6 +761,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         # and only when its window covered the chain point.
         if args.dry_run:
             chain_value = stored_scrape
+        elif exit_status == "partial":
+            chain_value = stored_scrape or uploaded_after
         elif exit_status != "success":
             chain_value = stored_scrape or uploaded_after
             if uploaded_after and chain_value:
@@ -788,7 +802,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.uploaded_before,
         )
 
-    return 0 if exit_status in ("success", "dry-run") else 1
+    return 0 if exit_status in ("success", "dry-run", "partial") else 1
 
 
 if __name__ == "__main__":

@@ -958,6 +958,26 @@ class TestMainRecoveryAndManifestChecks:
         assert "failed: 1" in text
         assert "next scheduled run retries it" in capsys.readouterr().out
 
+    def test_max_uploads_uploads_a_batch_and_holds_chain(self, tmp_path, monkeypatch, capsys):
+        self._seed_dir(tmp_path, {"uploaded_after_date": "2026-09-06", "uploaded_before_date": "None"})
+        status = self._seed_chain(tmp_path)
+        kwargs = {"authors": ["x"], "license": "CC BY", "platform": "drone", "data_access": "public",
+                  "acquisition_year": 2026, "acquisition_month": 9, "acquisition_day": 1,
+                  "additional_information": "x", "citation_doi": None}
+        specs = [oam_weekly.UploadSpec(f"{n}.tif", tmp_path / f"{n}.tif", kwargs) for n in "abc"]
+        self._stub_pipeline(monkeypatch, oam_weekly.Preparation(3, specs, 0))
+        uploaded = []
+        monkeypatch.setattr(oam_weekly.deadtrees_seam, "upload_and_process",
+                            lambda tif_path, **kw: uploaded.append(tif_path.name) or 1)
+        result = oam_weekly.main(self._argv(tmp_path, ["--max-uploads", "2"]))
+        assert result == 0
+        assert uploaded == ["a.tif", "b.tif"]
+        text = status.read_text(encoding="utf-8")
+        assert "exit: partial" in text
+        # The third candidate is still pending, so the window must not move.
+        assert "scrape_uploaded_at: 2026-09-06" in text
+        assert "1 candidate(s) left" in capsys.readouterr().out
+
     def test_aborted_run_holds_chain(self, tmp_path, monkeypatch):
         self._seed_dir(tmp_path, {"uploaded_after_date": "2026-09-06", "uploaded_before_date": "None"})
         status = self._seed_chain(tmp_path)
