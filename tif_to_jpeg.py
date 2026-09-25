@@ -101,7 +101,10 @@ def _convert_tif_to_20cm_jpeg(tif_path: str, output_path: str, target_meter_crs:
                     # Process in windows/blocks - GDAL handles I/O efficiently
                     for _, window in vrt.block_windows(1):
                         # Read window from VRT (GDAL does the resampling)
-                        data = vrt.read(window=window, out_dtype=np.uint8)
+                        # Only the colour bands: RGBA orthophotos (ODM) carry an alpha band
+                        data = vrt.read(
+                            indexes=list(range(1, num_bands + 1)), window=window, out_dtype=np.uint8
+                        )
 
                         # Clip to valid uint8 range
                         data = np.clip(data, 0, 255).astype(np.uint8)
