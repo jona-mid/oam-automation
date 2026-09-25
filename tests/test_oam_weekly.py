@@ -1055,3 +1055,86 @@ class TestParseArgs:
     def test_uploaded_before_parses_when_given(self):
         args = oam_weekly.parse_args(["--uploaded-csv", "ledger.csv", "--uploaded-before", "2026-09-07"])
         assert args.uploaded_before == "2026-09-07"
+
+
+class TestCaptureDateChecks:
+    def _row(self, **overrides):
+        return TestBuildUploadKwargs()._row(**overrides)
+
+    def test_compact_title_date_contradiction_is_rejected(self):
+        row = self._row(acquisition_date="2026-01-24", title="WattleBay_260710")
+        with pytest.raises(ValueError, match="title date 2026-07-10"):
+            oam_weekly.build_upload_kwargs(row, date(2026, 9, 21))
+
+    def test_space_separated_title_date(self):
+        assert oam_weekly.title_dates("Lake Helen 9 9 2021") == [date(2021, 9, 9)]
+
+    def test_numbers_that_are_not_dates(self):
+        for title in ["53646_33408sal_pembuangan", "orthomosaic_123456", "JAM-HM-SEL-AW-52-1", "Plan-2030"]:
+            assert oam_weekly.title_dates(title) == []
+
+    def test_placeholder_capture_date_is_rejected(self):
+        row = self._row(acquisition_date="2016-01-01", acquisition_start="2016-01-01T08:00:00.000Z")
+        with pytest.raises(ValueError, match="placeholder"):
+            oam_weekly.build_upload_kwargs(row, date(2026, 9, 21))
+
+    def test_placeholder_east_of_greenwich(self):
+        assert oam_weekly.is_placeholder_timestamp("2013-12-31T16:00:00.000Z")
+
+    def test_real_time_on_january_first_is_not_a_placeholder(self):
+        assert not oam_weekly.is_placeholder_timestamp("2026-01-01T09:13:22.000Z")
+        assert not oam_weekly.is_placeholder_timestamp("2026-07-08T04:00:00.000Z")
+
+    def test_capture_after_upload_is_rejected(self):
+        row = self._row(acquisition_date="2026-09-11", uploaded_at="2026-08-01T10:00:00.000Z")
+        with pytest.raises(ValueError, match="after the OAM upload"):
+            oam_weekly.build_upload_kwargs(row, date(2026, 9, 21))
+
+    def test_capture_on_upload_day_passes(self):
+        row = self._row(acquisition_date="2026-09-11", uploaded_at="2026-09-11T22:00:00.000Z")
+        assert oam_weekly.build_upload_kwargs(row, date(2026, 9, 21))["acquisition_day"] == 11
+
+    def _tif(self, path, datetime_tag):
+        import numpy as np
+        import rasterio
+        from rasterio.transform import from_origin
+
+        with rasterio.open(path, "w", driver="GTiff", width=4, height=4, count=3, dtype="uint8",
+                           crs="EPSG:4326", transform=from_origin(0, 1, 0.1, 0.1)) as dst:
+            dst.write(np.zeros((3, 4, 4), dtype="uint8"))
+            if datetime_tag:
+                dst.update_tags(TIFFTAG_DATETIME=datetime_tag)
+        return path
+
+    def test_tiff_processed_before_capture_is_rejected(self, tmp_path):
+        tif = self._tif(tmp_path / "a.tif", "2025:02:27 10:00:00")
+        with pytest.raises(ValueError, match="processed on 2025-02-27"):
+            oam_weekly.build_upload_kwargs(self._row(acquisition_date="2026-06-19"), date(2026, 9, 21), tif)
+
+    def test_tiff_processed_after_capture_passes(self, tmp_path):
+        tif = self._tif(tmp_path / "b.tif", "2026:10:02 10:00:00")
+        assert oam_weekly.build_upload_kwargs(self._row(), date(2026, 9, 21), tif)["acquisition_month"] == 9
+
+    def test_tiff_without_date_tag_passes(self, tmp_path):
+        tif = self._tif(tmp_path / "c.tif", None)
+        assert oam_weekly.build_upload_kwargs(self._row(), date(2026, 9, 21), tif)["acquisition_month"] == 9
+
+
+class TestTitleDateRefinements:
+    def test_six_digits_also_read_as_ddmmyy(self):
+        assert date(2025, 1, 22) in oam_weekly.title_dates("3_NSD_B1_Desp_220125")
+        oam_weekly.check_title_date("3_NSD_B1_Desp_220125", date(2025, 1, 25))
+
+    def test_event_date_before_flight_passes(self):
+        oam_weekly.check_title_date("Incendio Chingaza Febrero 2025", date(2025, 7, 21))
+
+    def test_event_word_does_not_excuse_a_flight_listed_before_the_event(self):
+        with pytest.raises(ValueError):
+            oam_weekly.check_title_date("Hurricane Melissa 2025-10-28", date(2025, 6, 1))
+
+    def test_title_dates_after_the_upload_are_ignored(self):
+        oam_weekly.check_title_date("Min-yr-Awel October 2025", date(2024, 9, 30), date(2025, 5, 22))
+
+    def test_real_contradiction_still_rejected_with_upload_known(self):
+        with pytest.raises(ValueError):
+            oam_weekly.check_title_date("Lowes  New Paltz May 16, 2022", date(2026, 7, 8), date(2026, 7, 8))

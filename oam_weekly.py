@@ -107,12 +107,13 @@ def load_gate_candidates(run_dir: Path) -> pd.DataFrame:
     jpeg_meta = pd.read_csv(run_dir / "metadata" / "jpeg_metadata.csv")
     # Both sides carry a `platform` column; keep the jpeg-metadata names clean.
     joined = report.merge(jpeg_meta, on="filename", how="inner", suffixes=("_report", ""))
-    # The OAM title feeds the title-date check in build_upload_kwargs.
+    # OAM title and timestamps feed the capture-date checks in build_upload_kwargs.
     pheno_csv = run_dir / "metadata" / "phenology.csv"
-    if pheno_csv.exists() and "title" not in joined.columns:
-        titles = pd.read_csv(pheno_csv, usecols=lambda c: c in ("filename", "title"), dtype=str)
-        if "title" in titles.columns:
-            joined = joined.merge(titles.drop_duplicates("filename"), on="filename", how="left")
+    wanted = [c for c in ("title", "acquisition_start", "uploaded_at") if c not in joined.columns]
+    if pheno_csv.exists() and wanted:
+        extra = pd.read_csv(pheno_csv, usecols=lambda c: c in ["filename", *wanted], dtype=str)
+        if len(extra.columns) > 1:
+            joined = joined.merge(extra.drop_duplicates("filename"), on="filename", how="left")
     return joined[
         (joined["modis_category"] == "in_season")
         & (joined["tree_canopy_leaf_state"] == "leaf_on")
@@ -238,12 +239,25 @@ def title_dates(title) -> List[date]:
     for m in re.finditer(r"\b(\d{1,2})\s*[-_./]\s*(\d{1,2})\s*[-_./]\s*((?:19|20)\d{2})\b", text):
         first, second, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
         parts.update({(year, first, second), (year, second, first)})
+    for m in re.finditer(r"\b(\d{1,2})\s+(\d{1,2})\s+((?:19|20)\d{2})\b", text):
+        first, second, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        parts.update({(year, first, second), (year, second, first)})
+    # Compact YYYYMMDD / six digits only right after "_" or "-" (WattleBay_260710),
+    # so tile indices and other numbers are not read as dates. Six digits are
+    # read both as YYMMDD and DDMMYY (Desp_220125 = 22 Jan 2025).
+    for m in re.finditer(r"[_-](20\d{2})(\d{2})(\d{2})(?!\d)", text):
+        parts.add((int(m.group(1)), int(m.group(2)), int(m.group(3))))
+    for m in re.finditer(r"[_-](\d{2})(\d{2})(\d{2})(?!\d)", text):
+        first, middle, last = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        parts.update({(2000 + first, middle, last), (2000 + last, middle, first)})
     if not parts:
         for m in re.finditer(r"\b([a-z]{3,9})\.?\s+((?:19|20)\d{2})\b", text):
             if m.group(1)[:3] in MONTHS:
                 parts.add((int(m.group(2)), MONTHS[m.group(1)[:3]], 15))
     dates = []
     for year, month, day in parts:
+        if not 2010 <= year <= date.today().year:
+            continue
         try:
             dates.append(date(year, month, day))
         except ValueError:
@@ -251,30 +265,112 @@ def title_dates(title) -> List[date]:
     return dates
 
 
-def check_title_date(title, acquisition: date) -> None:
+EVENT_WORDS = re.compile(
+    r"fire|incendi|feu|brand|wildfire|tornado|hurrican|huracan|huracán|cyclon|typhoon|storm|tormenta"
+    r"|flood|inund|earthquake|sismo|terremoto|quake|landslide|deslizamiento|eruption|disaster|desastre",
+    re.IGNORECASE,
+)
+
+
+def check_title_date(title, acquisition: date, uploaded: Optional[date] = None) -> None:
     """Fail closed when the title names a capture date that contradicts acquisition_date.
 
     Some providers enter the upload date as the capture date; the title then
     still carries the real one. Every reading of the title must be more than
-    TITLE_DATE_TOLERANCE_DAYS away for the image to be rejected.
+    TITLE_DATE_TOLERANCE_DAYS away for the image to be rejected. Readings after
+    the upload cannot be the flight date and are ignored; in titles naming an
+    event (fire, hurricane, ...) the date is the event's, and flying after it
+    is expected.
     """
     dates = title_dates(title)
+    if uploaded is not None:
+        dates = [d for d in dates if (d - uploaded).days <= 1]
     if not dates:
         return
     closest = min(dates, key=lambda d: abs((d - acquisition).days))
-    if abs((closest - acquisition).days) > TITLE_DATE_TOLERANCE_DAYS:
+    offset = (acquisition - closest).days
+    if abs(offset) <= TITLE_DATE_TOLERANCE_DAYS:
+        return
+    if offset > 0 and EVENT_WORDS.search(str(title)):
+        return
+    raise ValueError(
+        f"title date {closest.isoformat()} contradicts capture date {acquisition.isoformat()}"
+    )
+
+
+TIFF_DATE_TOLERANCE_DAYS = 30
+
+
+def is_placeholder_timestamp(raw) -> bool:
+    """A capture time of exactly local midnight on January 1: only the year was known.
+
+    Stored in UTC, local midnight shows up as a whole hour on Jan 1 (west of
+    Greenwich) or on Dec 31 from 10:00 (east of it).
+    """
+    stamp = pd.to_datetime(raw, utc=True, errors="coerce")
+    if pd.isna(stamp) or stamp.minute or stamp.second or stamp.microsecond:
+        return False
+    return (stamp.month == 1 and stamp.day == 1 and stamp.hour <= 14) or (
+        stamp.month == 12 and stamp.day == 31 and stamp.hour >= 10
+    )
+
+
+def tiff_processing_date(tif_path: Path) -> Optional[date]:
+    """TIFFTAG_DATETIME as written by ODM, Pix4D, etc. when the orthophoto was processed."""
+    import rasterio
+
+    # Extra evidence only: an unreadable tag means no signal, and a broken
+    # file fails at upload anyway.
+    try:
+        with rasterio.open(tif_path) as src:
+            value = src.tags().get("TIFFTAG_DATETIME") or ""
+    except Exception:
+        return None
+    match = re.match(r"(\d{4}):(\d{2}):(\d{2})", value)
+    if not match:
+        return None
+    try:
+        return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return None
+
+
+def check_capture_date(row: pd.Series, acquisition: date, tif_path: Optional[Path] = None) -> None:
+    """Fail closed on capture dates that the metadata or the file itself contradicts.
+
+    A wrong capture date both misleads the season check and lands on the
+    platform, so each signal rejects the candidate (logged, counted as
+    rejected, never uploaded):
+    - capture after the OAM upload (impossible)
+    - placeholder date (Jan 1, local midnight): the season is unknown
+    - a date in the title that contradicts the capture date
+    - a TIFF processing date well before the capture date (impossible)
+    """
+    uploaded = pd.to_datetime(row.get("uploaded_at"), utc=True, errors="coerce")
+    if not pd.isna(uploaded) and (acquisition - uploaded.date()).days > 1:
         raise ValueError(
-            f"title date {closest.isoformat()} contradicts capture date {acquisition.isoformat()}"
+            f"capture date {acquisition.isoformat()} is after the OAM upload {uploaded.date().isoformat()}"
         )
+    if is_placeholder_timestamp(row.get("acquisition_start")):
+        raise ValueError(
+            f"capture date {acquisition.isoformat()} is a placeholder (Jan 1, no time of day)"
+        )
+    check_title_date(row.get("title"), acquisition, None if pd.isna(uploaded) else uploaded.date())
+    if tif_path is not None:
+        processed = tiff_processing_date(tif_path)
+        if processed is not None and (acquisition - processed).days > TIFF_DATE_TOLERANCE_DAYS:
+            raise ValueError(
+                f"TIFF was processed on {processed.isoformat()}, before the capture date {acquisition.isoformat()}"
+            )
 
 
-def build_upload_kwargs(row: pd.Series, run_date: date) -> dict:
+def build_upload_kwargs(row: pd.Series, run_date: date, tif_path: Optional[Path] = None) -> dict:
     """Build deadtrees-cli upload kwargs from a joined candidate row. Fails closed on unknown values."""
     acquisition_raw = row["acquisition_date"]
     if pd.isna(acquisition_raw) or not str(acquisition_raw).strip():
         raise ValueError("missing acquisition_date")
     acquisition = datetime.strptime(str(acquisition_raw).strip(), "%Y-%m-%d").date()
-    check_title_date(row.get("title"), acquisition)
+    check_capture_date(row, acquisition, tif_path)
     platform = str(row["platform"]).strip().lower()
     authors = row["authors"]
     if pd.isna(authors) or not str(authors).strip():
@@ -508,7 +604,7 @@ def prepare_candidates(
             rejected += 1
             continue
         try:
-            kwargs = build_upload_kwargs(row, date.today())
+            kwargs = build_upload_kwargs(row, date.today(), tif_path)
         except Exception as error:
             print(f"  ! {filename}: candidate rejected ({error}), skipping")
             rejected += 1
