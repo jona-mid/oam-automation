@@ -31,7 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 Image.MAX_IMAGE_PIXELS = None
-PROMPT_VERSION = "phenology-v2"
+PROMPT_VERSION = "phenology-v3"
 PROMPT = """You are classifying visible TREE-CANOPY phenology in one aerial image.
 Judge only visible woody tree crowns. Do not infer date, location, season,
 platform, metadata, or MODIS. Crops, grass, and other non-tree vegetation never
@@ -42,8 +42,7 @@ Return JSON only with exactly these fields:
 - visual_cue: 3 to 12 words describing visible evidence
 
 Definitions:
-- leaf_on: clearly green, foliated tree canopy, with no obvious autumn colouring
-  or leaf-off crowns.
+- leaf_on: clearly green, foliated tree canopy, with no obvious autumn colouring.
 - not_leaf_on: visible autumn-coloured, brown, sparse, or bare/leafless tree
   crowns.
 - not_assessable: tree canopy is absent, too small, obscured, or cannot be
@@ -288,8 +287,13 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
         handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def current_attempts(path: Path) -> list[dict[str, Any]]:
+    """Attempts made with the current prompt; a prompt change re-reviews every image."""
+    return [row for row in read_attempts(path) if row.get("prompt_version") == PROMPT_VERSION]
+
+
 def successful_ids(path: Path) -> set[str]:
-    return {str(row["image_id"]) for row in read_attempts(path) if row.get("status") == "success" and row.get("image_id")}
+    return {str(row["image_id"]) for row in current_attempts(path) if row.get("status") == "success" and row.get("image_id")}
 
 
 def error_details(exc: Exception) -> tuple[int | None, str]:
@@ -362,7 +366,7 @@ def run_phenology(manifest: Path, attempts: Path, endpoint: str, model: str, api
 
 def latest_by_image(path: Path) -> dict[str, dict[str, Any]]:
     latest: dict[str, dict[str, Any]] = {}
-    for row in read_attempts(path):
+    for row in current_attempts(path):
         if isinstance(row.get("image_id"), str):
             latest[row["image_id"]] = row
     return latest
