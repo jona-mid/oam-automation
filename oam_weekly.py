@@ -13,6 +13,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -106,6 +107,12 @@ def load_gate_candidates(run_dir: Path) -> pd.DataFrame:
     jpeg_meta = pd.read_csv(run_dir / "metadata" / "jpeg_metadata.csv")
     # Both sides carry a `platform` column; keep the jpeg-metadata names clean.
     joined = report.merge(jpeg_meta, on="filename", how="inner", suffixes=("_report", ""))
+    # The OAM title feeds the title-date check in build_upload_kwargs.
+    pheno_csv = run_dir / "metadata" / "phenology.csv"
+    if pheno_csv.exists() and "title" not in joined.columns:
+        titles = pd.read_csv(pheno_csv, usecols=lambda c: c in ("filename", "title"), dtype=str)
+        if "title" in titles.columns:
+            joined = joined.merge(titles.drop_duplicates("filename"), on="filename", how="left")
     return joined[
         (joined["modis_category"] == "in_season")
         & (joined["tree_canopy_leaf_state"] == "leaf_on")
@@ -204,12 +211,70 @@ def advance_scrape_uploaded_at(
     return max(stored_date, scrape_date).isoformat(), None
 
 
+MONTHS = {name: number for number, name in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1
+)}
+TITLE_DATE_TOLERANCE_DAYS = 30
+
+
+def title_dates(title) -> List[date]:
+    """Every calendar date a free-text OAM title can be read as.
+
+    Numeric day/month dates are ambiguous (7/11/2015), so both orders are
+    returned; a "Month YYYY" title is read as the 15th of that month.
+    """
+    if title is None or (isinstance(title, float) and pd.isna(title)):
+        return []
+    text = str(title).lower()
+    parts = set()
+    for m in re.finditer(r"\b([a-z]{3})[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+((?:19|20)\d{2})\b", text):
+        if m.group(1) in MONTHS:
+            parts.add((int(m.group(3)), MONTHS[m.group(1)], int(m.group(2))))
+    for m in re.finditer(r"\b(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]{3})[a-z]*\.?,?\s+((?:19|20)\d{2})\b", text):
+        if m.group(2) in MONTHS:
+            parts.add((int(m.group(3)), MONTHS[m.group(2)], int(m.group(1))))
+    for m in re.finditer(r"\b((?:19|20)\d{2})[-_./](\d{1,2})[-_./](\d{1,2})\b", text):
+        parts.add((int(m.group(1)), int(m.group(2)), int(m.group(3))))
+    for m in re.finditer(r"\b(\d{1,2})\s*[-_./]\s*(\d{1,2})\s*[-_./]\s*((?:19|20)\d{2})\b", text):
+        first, second, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        parts.update({(year, first, second), (year, second, first)})
+    if not parts:
+        for m in re.finditer(r"\b([a-z]{3,9})\.?\s+((?:19|20)\d{2})\b", text):
+            if m.group(1)[:3] in MONTHS:
+                parts.add((int(m.group(2)), MONTHS[m.group(1)[:3]], 15))
+    dates = []
+    for year, month, day in parts:
+        try:
+            dates.append(date(year, month, day))
+        except ValueError:
+            continue
+    return dates
+
+
+def check_title_date(title, acquisition: date) -> None:
+    """Fail closed when the title names a capture date that contradicts acquisition_date.
+
+    Some providers enter the upload date as the capture date; the title then
+    still carries the real one. Every reading of the title must be more than
+    TITLE_DATE_TOLERANCE_DAYS away for the image to be rejected.
+    """
+    dates = title_dates(title)
+    if not dates:
+        return
+    closest = min(dates, key=lambda d: abs((d - acquisition).days))
+    if abs((closest - acquisition).days) > TITLE_DATE_TOLERANCE_DAYS:
+        raise ValueError(
+            f"title date {closest.isoformat()} contradicts capture date {acquisition.isoformat()}"
+        )
+
+
 def build_upload_kwargs(row: pd.Series, run_date: date) -> dict:
     """Build deadtrees-cli upload kwargs from a joined candidate row. Fails closed on unknown values."""
     acquisition_raw = row["acquisition_date"]
     if pd.isna(acquisition_raw) or not str(acquisition_raw).strip():
         raise ValueError("missing acquisition_date")
     acquisition = datetime.strptime(str(acquisition_raw).strip(), "%Y-%m-%d").date()
+    check_title_date(row.get("title"), acquisition)
     platform = str(row["platform"]).strip().lower()
     authors = row["authors"]
     if pd.isna(authors) or not str(authors).strip():

@@ -190,6 +190,46 @@ class TestBuildUploadKwargs:
             )
 
 
+class TestTitleDates:
+    def test_month_name_dates(self):
+        assert oam_weekly.title_dates("Lowes  New Paltz May 16, 2022") == [date(2022, 5, 16)]
+        assert oam_weekly.title_dates("highland rail trail june 30 2024") == [date(2024, 6, 30)]
+        assert oam_weekly.title_dates("Flight on 3rd March 2024") == [date(2024, 3, 3)]
+
+    def test_numeric_dates_give_both_readings(self):
+        assert set(oam_weekly.title_dates("AIT Golf Course - 7/11/2015")) == {date(2015, 7, 11), date(2015, 11, 7)}
+        assert oam_weekly.title_dates("Neversink 6. 13. 2023") == [date(2023, 6, 13)]
+        assert oam_weekly.title_dates("Survey 2026-06-01") == [date(2026, 6, 1)]
+
+    def test_month_and_year_only(self):
+        assert oam_weekly.title_dates("Flight March 2024") == [date(2024, 3, 15)]
+
+    def test_titles_without_dates(self):
+        for title in ["53646_33408sal_pembuangan_handil", "Chattogram UAV 55", "Plan 2030", "", None, float("nan")]:
+            assert oam_weekly.title_dates(title) == []
+
+
+class TestTitleDateCheck:
+    def _row(self, **overrides):
+        return TestBuildUploadKwargs()._row(**overrides)
+
+    def test_contradicting_title_date_is_rejected(self):
+        row = self._row(acquisition_date="2026-07-08", title="Lowes  New Paltz May 16, 2022")
+        with pytest.raises(ValueError, match="title date 2022-05-16 contradicts capture date 2026-07-08"):
+            oam_weekly.build_upload_kwargs(row, date(2026, 9, 21))
+
+    def test_matching_title_date_passes(self):
+        row = self._row(acquisition_date="2022-01-03", title="Mason Road - 1/3/2022")
+        assert oam_weekly.build_upload_kwargs(row, date(2026, 9, 21))["acquisition_year"] == 2022
+
+    def test_small_offset_within_tolerance_passes(self):
+        row = self._row(acquisition_date="2026-09-11", title="Survey 2026-08-20")
+        assert oam_weekly.build_upload_kwargs(row, date(2026, 9, 21))["acquisition_day"] == 11
+
+    def test_missing_title_passes(self):
+        assert oam_weekly.build_upload_kwargs(self._row(), date(2026, 9, 21))["acquisition_month"] == 9
+
+
 class TestSeamSignature:
     def test_upload_kwargs_match_seam_signature(self):
         """The wrapper spreads build_upload_kwargs into the seam; keys must match its parameters."""
