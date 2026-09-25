@@ -30,6 +30,51 @@ def csv_rows(path):
         return list(csv.DictReader(handle))
 
 
+def run_vlm_stages(output, tifs, jpegs, pheno_csv, tif_metadata, endpoint, model, workers):
+    """Audit manifest -> VLM review -> report into `output`; returns the manifest stage entries.
+
+    Skipped when metadata/phenology_report.csv exists. Fails (SystemExit) when
+    any in-season image lacks a successful review.
+    """
+    audit_manifest_csv = output / "metadata" / "audit_manifest.csv"
+    vlm_attempts = output / "logs" / "phenology-attempts.jsonl"
+    vlm_report_csv = output / "metadata" / "phenology_report.csv"
+    vlm_images = output / "vlm_images"
+
+    if not vlm_report_csv.exists():
+        if not audit_manifest_csv.exists():
+            run("aerial_phenology_audit.py", "manifest", "--source", tifs, "--jpegs", jpegs, "--phenology", pheno_csv, "--metadata", tif_metadata, "--output", audit_manifest_csv, cwd=output)
+
+        run("aerial_phenology_audit.py", "phenology-run", "--manifest", audit_manifest_csv, "--attempts", vlm_attempts, "--endpoint", endpoint, "--model", model, "--workers", workers, "--priorities", "in_season", cwd=output)
+
+        if vlm_images.exists() and any(vlm_images.iterdir()):
+            shutil.rmtree(vlm_images)
+        run("aerial_phenology_audit.py", "phenology-report", "--manifest", audit_manifest_csv, "--attempts", vlm_attempts, "--output", vlm_report_csv, "--images", vlm_images, cwd=output)
+
+        # phenology-run records API errors (bad key, no credits, outages) and
+        # exits 0. Those images would silently fall out of the upload gate, so
+        # fail instead and drop the report: a re-run into this dir retries only
+        # the failed images (successful attempts are kept), and the wrapper
+        # keeps the weekly window in place until then.
+        unreviewed = [
+            row for row in csv_rows(vlm_report_csv)
+            if row.get("modis_category") == "in_season" and row.get("review_status") != "success"
+        ]
+        if unreviewed:
+            vlm_report_csv.unlink()
+            errors = sorted({row.get("http_status") or row.get("error") or row.get("review_status") for row in unreviewed})
+            raise SystemExit(
+                f"VLM review failed for {len(unreviewed)} in-season image(s) (errors: {', '.join(map(str, errors))[:300]}); "
+                f"check OPENROUTER_API_KEY and credits, then re-run into {output} to retry"
+            )
+
+    return {
+        "audit_manifest": {"output": str(audit_manifest_csv)},
+        "vlm_run": {"attempts": str(vlm_attempts), "model": model},
+        "vlm_report": {"output": str(vlm_report_csv), "images": str(vlm_images)},
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=Path("run"))
@@ -133,42 +178,9 @@ def main():
         run("create_metadata.py", "jpeg", "--source-metadata", tif_metadata, "--jpeg-folder", jpegs, "--output-metadata", jpeg_metadata, cwd=output)
     manifest["stages"]["metadata"] = {"tif": str(tif_metadata), "jpeg": str(jpeg_metadata)}
 
-    # VLM audit stages
-    audit_manifest_csv = metadata / "audit_manifest.csv"
-    vlm_attempts = logs / "phenology-attempts.jsonl"
-    vlm_report_csv = metadata / "phenology_report.csv"
-    vlm_images = output / "vlm_images"
-
-    if not vlm_report_csv.exists():
-        if not audit_manifest_csv.exists():
-            run("aerial_phenology_audit.py", "manifest", "--source", tifs, "--jpegs", jpegs, "--phenology", pheno_csv, "--metadata", tif_metadata, "--output", audit_manifest_csv, cwd=output)
-
-        run("aerial_phenology_audit.py", "phenology-run", "--manifest", audit_manifest_csv, "--attempts", vlm_attempts, "--endpoint", args.vlm_endpoint, "--model", args.vlm_model, "--workers", args.vlm_workers, "--priorities", "in_season", cwd=output)
-
-        if vlm_images.exists() and any(vlm_images.iterdir()):
-            shutil.rmtree(vlm_images)
-        run("aerial_phenology_audit.py", "phenology-report", "--manifest", audit_manifest_csv, "--attempts", vlm_attempts, "--output", vlm_report_csv, "--images", vlm_images, cwd=output)
-
-        # phenology-run records API errors (bad key, no credits, outages) and
-        # exits 0. Those images would silently fall out of the upload gate, so
-        # fail instead and drop the report: a re-run into this dir retries only
-        # the failed images (successful attempts are kept), and the wrapper
-        # keeps the weekly window in place until then.
-        unreviewed = [
-            row for row in csv_rows(vlm_report_csv)
-            if row.get("modis_category") == "in_season" and row.get("review_status") != "success"
-        ]
-        if unreviewed:
-            vlm_report_csv.unlink()
-            errors = sorted({row.get("http_status") or row.get("error") or row.get("review_status") for row in unreviewed})
-            raise SystemExit(
-                f"VLM review failed for {len(unreviewed)} in-season image(s) (errors: {', '.join(map(str, errors))[:300]}); "
-                f"check OPENROUTER_API_KEY and credits, then re-run into {output} to retry"
-            )
-
-    manifest["stages"]["audit_manifest"] = {"output": str(audit_manifest_csv)}
-    manifest["stages"]["vlm_run"] = {"attempts": str(vlm_attempts), "model": args.vlm_model}
-    manifest["stages"]["vlm_report"] = {"output": str(vlm_report_csv), "images": str(vlm_images)}
+    manifest["stages"].update(
+        run_vlm_stages(output, tifs, jpegs, pheno_csv, tif_metadata, args.vlm_endpoint, args.vlm_model, args.vlm_workers)
+    )
     return finish()
 
 

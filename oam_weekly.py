@@ -375,8 +375,13 @@ def prepare_candidates(
     ledger: Set[str],
     run_dir: Path,
     server_check: bool,
+    build_kwargs=build_upload_kwargs,
 ) -> Preparation:
-    """Diff gate rows against the ledger and the platform, then build upload specs."""
+    """Diff gate rows against the ledger and the platform, then build upload specs.
+
+    `build_kwargs(row, run_date)` turns a gate row into upload kwargs; it
+    raises to reject a candidate (the OAM builder by default).
+    """
     candidates = [
         row for _, row in gate.iterrows() if normalize_filename(row["filename"]) not in ledger
     ]
@@ -443,7 +448,7 @@ def prepare_candidates(
             rejected += 1
             continue
         try:
-            kwargs = build_upload_kwargs(row, date.today())
+            kwargs = build_kwargs(row, date.today())
         except Exception as error:
             print(f"  ! {filename}: candidate rejected ({error}), skipping")
             rejected += 1
