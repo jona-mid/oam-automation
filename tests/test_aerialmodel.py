@@ -205,6 +205,7 @@ class TestMain:
         monkeypatch.setattr(weekly.pipeline, "run_vlm_stages", fake_vlm)
         monkeypatch.setattr(weekly.deadtrees_seam, "file_hash", lambda path: f"hash-{Path(path).name}")
         monkeypatch.setattr(weekly.deadtrees_seam, "file_hashes_on_platform", lambda hashes: {})
+        monkeypatch.setattr(weekly.deadtrees_seam, "find_dataset", lambda name, created_after: None)
         uploads = []
 
         def fake_upload(path, **kwargs):

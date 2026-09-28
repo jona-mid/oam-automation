@@ -452,16 +452,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             batch = prep.specs if args.max_uploads is None else prep.specs[: max(args.max_uploads, 0)]
             remaining = len(prep.specs) - len(batch)
-            for spec in batch:
-                try:
-                    dataset_id = deadtrees_seam.upload_and_process(spec.tif_path, **spec.kwargs)
-                except Exception as error:
-                    print(f"  x {spec.filename}: upload failed: {error}")
-                    counts.failed += 1
-                    continue
-                oam_weekly.append_ledger_row(args.uploaded_csv, spec.filename, spec.kwargs)
-                counts.uploaded += 1
-                print(f"  + {spec.filename} uploaded (dataset {dataset_id}), ledger row appended")
+            oam_weekly.upload_batch(batch, args.uploaded_csv, counts)
             print(f"Summary: {counts.candidates} candidates, {counts.uploaded} uploaded, "
                   f"{counts.failed} failed, {counts.rejected} rejected.")
             exit_status = "success" if counts.failed == 0 else "failed"
