@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
-import glob
 import json
 import logging
 import os
@@ -157,50 +156,6 @@ def get_tif_dimensions(tif_path: str) -> Dict[str, Optional[int]]:
             return {"width": w, "height": h, "pixels": w * h}
     except Exception:
         return {"width": None, "height": None, "pixels": None}
-
-
-def load_image_size_csv(path: str) -> Dict[str, Dict[str, int]]:
-    """Load image dimensions from CSV (Filename, Height, Width)."""
-    image_dims: Dict[str, Dict[str, int]] = {}
-    if not os.path.exists(path):
-        return image_dims
-
-    try:
-        with open(path, "r", encoding="utf-8-sig", newline="") as f:
-            reader = csv.DictReader(f)
-            for r in reader:
-                fname = r.get("Filename", "").strip()
-                if fname:
-                    try:
-                        h = int(r.get("Height", 0))
-                        w = int(r.get("Width", 0))
-                        image_dims[fname] = {"height": h, "width": w, "pixels": h * w}
-                    except ValueError:
-                        continue
-    except Exception:
-        pass
-    return image_dims
-
-
-def load_uploaded_filenames(folder: str) -> Set[str]:
-    """Load filenames from uploaded CSVs in a folder."""
-    uploaded_files: Set[str] = set()
-    if not os.path.exists(folder):
-        return uploaded_files
-
-    csv_files = glob.glob(os.path.join(folder, "*.csv"))
-    for csv_file in csv_files:
-        try:
-            with open(csv_file, "r", encoding="utf-8-sig", newline="") as f:
-                reader = csv.DictReader(f)
-                if "filename" in reader.fieldnames:
-                    for r in reader:
-                        fname = r.get("filename", "").strip()
-                        if fname:
-                            uploaded_files.add(fname)
-        except Exception:
-            continue
-    return uploaded_files
 
 
 def configure_download_logging(log_file: str = "download.log") -> logging.Logger:

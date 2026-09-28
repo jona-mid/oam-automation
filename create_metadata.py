@@ -4,8 +4,7 @@ Unified metadata creation tool for OpenAerialMap scraper.
 
 Usage:
     python create_metadata.py tif --csv <file> --output-dir <dir> [--add-image-size]
-    python create_metadata.py jpeg --source-metadata <file> --jpeg-folder <dir> [options]
-    python create_metadata.py filter --selected <file> --metadata <file> --phenology <file> [options]
+    python create_metadata.py jpeg --source-metadata <file> --jpeg-folder <dir> --output-metadata <file>
 """
 
 import argparse
@@ -142,78 +141,26 @@ def cmd_jpeg(args):
         logger.error(f"JPEG folder not found: {args.jpeg_folder}")
         return
 
-    logger.info(f"Reading source metadata: {args.source_metadata}")
     csv_rows = utils.read_csv(args.source_metadata)
-    logger.info(f"Loaded {len(csv_rows)} rows from source metadata")
+    logger.info(f"Loaded {len(csv_rows)} rows from {args.source_metadata}")
+    rows_by_stem = {}
+    for row in csv_rows:
+        rows_by_stem.setdefault(os.path.splitext(row.get("filename", ""))[0], row)
 
-    image_dims_map = {}
-    if args.image_size_csv and os.path.exists(args.image_size_csv):
-        logger.info(f"Reading image size CSV: {args.image_size_csv}")
-        image_dims_map = utils.load_image_size_csv(args.image_size_csv)
-        logger.info(f"Loaded dimensions for {len(image_dims_map)} images")
-
-    uploaded_files = set()
-    if args.uploaded_folder and os.path.exists(args.uploaded_folder):
-        logger.info(f"Scanning uploaded folder: {args.uploaded_folder}")
-        uploaded_files = utils.load_uploaded_filenames(args.uploaded_folder)
-        logger.info(f"Found {len(uploaded_files)} uploaded files to exclude")
-
-    jpeg_files = [
+    jpeg_files = sorted(
         f for f in os.listdir(args.jpeg_folder) if f.lower().endswith((".jpg", ".jpeg"))
-    ]
-    jpeg_files.sort()
-
-    if args.prioritize_small_files:
-
-        def size_key(name):
-            if name in image_dims_map:
-                return image_dims_map[name].get("pixels", float("inf"))
-            try:
-                return os.path.getsize(os.path.join(args.jpeg_folder, name))
-            except OSError:
-                return float("inf")
-
-        jpeg_files.sort(key=lambda n: (size_key(n), n.lower()))
-
+    )
     logger.info(f"Found {len(jpeg_files)} JPEG files")
 
     metadata_list = []
-    matched_jpeg_names = []
-    matched = 0
-    skipped_uploaded = 0
     not_found = 0
-
     for jpeg_filename in jpeg_files:
         potential_tif = os.path.splitext(jpeg_filename)[0]
-
-        if potential_tif in uploaded_files:
-            skipped_uploaded += 1
-            continue
-
-        match = None
-        for row in csv_rows:
-            if row.get("filename") == potential_tif:
-                match = row
-                break
-            if (
-                os.path.splitext(row.get("filename", ""))[0]
-                == os.path.splitext(potential_tif)[0]
-            ):
-                match = row
-                break
-
+        match = rows_by_stem.get(os.path.splitext(potential_tif)[0])
         if not match:
             logger.warning(f"No matching CSV row for JPEG: {jpeg_filename}")
             not_found += 1
             continue
-
-        dims = image_dims_map.get(potential_tif)
-        if not dims and match.get("width") and match.get("height"):
-            try:
-                w, h = int(match["width"]), int(match["height"])
-                dims = {"width": w, "height": h, "pixels": w * h}
-            except (ValueError, TypeError):
-                pass
 
         acquisition_date = ""
         if match.get("capture_date"):
@@ -221,41 +168,28 @@ def cmd_jpeg(args):
             if date:
                 acquisition_date = date.isoformat()
 
-        platform = utils.remap_platform(match.get("platform", ""))
-
-        additional_info = ""
-        if match.get("_id"):
-            additional_info = (
-                f"This orthophoto data is available through OpenAerialMap, provided by Contributors of Open Imagery Network. "
-                f"More information: https://api.openaerialmap.org/meta?_id={match['_id']} Accessed December 4, 2025."
-            )
-
         entry = {
             "filename": match.get("filename", potential_tif),
             "acquisition_date": acquisition_date,
-            "platform": platform,
+            "platform": utils.remap_platform(match.get("platform", "")),
             "licence": "CC BY",
             "oam_id": match.get("_id", ""),
             "property_license": match.get("property_license", ""),
             "authors": "Contributors of Open Imagery Network",
-            "additional_information": additional_info,
             "gsd": match.get("gsd", ""),
             "pheno_start_doy": match.get("pheno_start_doy", ""),
             "pheno_end_doy": match.get("pheno_end_doy", ""),
         }
-
-        if dims:
-            entry["height"] = str(dims.get("height", ""))
-            entry["width"] = str(dims.get("width", ""))
-            entry["pixels"] = str(dims.get("pixels", ""))
+        if match.get("width") and match.get("height"):
+            try:
+                width, height = int(match["width"]), int(match["height"])
+                entry.update(height=str(height), width=str(width), pixels=str(width * height))
+            except (ValueError, TypeError):
+                pass
 
         metadata_list.append(entry)
-        matched_jpeg_names.append(jpeg_filename)
-        matched += 1
 
-    logger.info(
-        f"Matched {matched} JPEG files, skipped {skipped_uploaded} uploaded, not found {not_found}"
-    )
+    logger.info(f"Matched {len(metadata_list)} JPEG files, not found {not_found}")
 
     if not metadata_list:
         logger.warning("No metadata entries created")
@@ -306,17 +240,6 @@ Examples:
         "--output-metadata",
         default="jpegs/jpeg_metadata.csv",
         help="Output CSV path",
-    )
-    p_jpeg.add_argument(
-        "--image-size-csv", default="", help="Optional CSV with image dimensions"
-    )
-    p_jpeg.add_argument(
-        "--uploaded-folder", default="", help="Folder with uploaded CSVs to exclude"
-    )
-    p_jpeg.add_argument(
-        "--prioritize-small-files",
-        action="store_true",
-        help="Process smallest files first",
     )
 
     args = parser.parse_args()

@@ -41,7 +41,6 @@ def run_vlm_stages(output, tifs, jpegs, pheno_csv, tif_metadata, endpoint, model
     audit_manifest_csv = output / "metadata" / "audit_manifest.csv"
     vlm_attempts = output / "logs" / "phenology-attempts.jsonl"
     vlm_report_csv = output / "metadata" / "phenology_report.csv"
-    vlm_images = output / "vlm_images"
 
     if not vlm_report_csv.exists():
         if not audit_manifest_csv.exists():
@@ -49,9 +48,7 @@ def run_vlm_stages(output, tifs, jpegs, pheno_csv, tif_metadata, endpoint, model
 
         run("aerial_phenology_audit.py", "phenology-run", "--manifest", audit_manifest_csv, "--attempts", vlm_attempts, "--endpoint", endpoint, "--model", model, "--api-key-env", api_key_env, "--workers", workers, "--priorities", "in_season", cwd=output)
 
-        if vlm_images.exists() and any(vlm_images.iterdir()):
-            shutil.rmtree(vlm_images)
-        run("aerial_phenology_audit.py", "phenology-report", "--manifest", audit_manifest_csv, "--attempts", vlm_attempts, "--output", vlm_report_csv, "--images", vlm_images, cwd=output)
+        run("aerial_phenology_audit.py", "phenology-report", "--manifest", audit_manifest_csv, "--attempts", vlm_attempts, "--output", vlm_report_csv, cwd=output)
 
         # phenology-run records API errors (bad key, no credits, outages) and
         # exits 0. Those images would silently fall out of the upload gate, so
@@ -73,7 +70,7 @@ def run_vlm_stages(output, tifs, jpegs, pheno_csv, tif_metadata, endpoint, model
     return {
         "audit_manifest": {"output": str(audit_manifest_csv)},
         "vlm_run": {"attempts": str(vlm_attempts), "model": model},
-        "vlm_report": {"output": str(vlm_report_csv), "images": str(vlm_images)},
+        "vlm_report": {"output": str(vlm_report_csv)},
     }
 
 
@@ -86,7 +83,6 @@ def main():
     parser.add_argument("--forest-max", type=float, default=None)
     parser.add_argument("--platform", nargs="+", default=["uav", "aircraft"])
     parser.add_argument("--pad-days", type=int, default=30)
-    parser.add_argument("--thumbnail-workers", type=int, default=8)
     parser.add_argument("--tif-workers", type=int, default=8)
     parser.add_argument("--jpeg-workers", type=int, default=8)
     # Any OpenAI-compatible chat-completions endpoint works (OpenRouter by
@@ -101,11 +97,10 @@ def main():
     output = args.output_dir.resolve()
     raw = output / "raw"
     metadata = output / "metadata"
-    thumbnails = output / "thumbnails"
     tifs = output / "tifs"
     jpegs = output / "jpegs"
     logs = output / "logs"
-    for directory in (raw, metadata, thumbnails, tifs, jpegs, logs):
+    for directory in (raw, metadata, tifs, jpegs, logs):
         directory.mkdir(parents=True, exist_ok=True)
 
     manifest = {
@@ -159,15 +154,11 @@ def main():
     if not any(row.get("pheno_season") == "in_season" for row in csv_rows(pheno_csv)):
         return finish("no in-season images in the upload window")
 
-    # The download stages always run: they skip files already fetched, so a
+    # The download stage always runs: it skips files already fetched, so a
     # resumed run completes a download that died partway instead of silently
     # continuing with a partial set. Only in-season images can pass the
-    # upload gate; the TIFF download follows the thumbnails, so out-of-season
-    # TIFFs are never fetched.
-    run("download.py", "thumbnails", "--csv", pheno_csv, "--folder", thumbnails, "--season", "in_season", "--workers", args.thumbnail_workers, cwd=output)
-    manifest["stages"]["thumbnails"] = {"files": count_files(thumbnails, {".png", ".jpg", ".jpeg"}), "output": str(thumbnails)}
-
-    run("download.py", "tifs", "--csv", pheno_csv, "--thumbnails-dir", thumbnails, "--output-dir", tifs, "--workers", args.tif_workers, cwd=output)
+    # upload gate, so out-of-season TIFFs are never fetched.
+    run("download.py", "--csv", pheno_csv, "--season", "in_season", "--output-dir", tifs, "--workers", args.tif_workers, cwd=output)
     manifest["stages"]["tifs"] = {"files": count_files(tifs, {".tif", ".tiff"}), "output": str(tifs)}
     if not manifest["stages"]["tifs"]["files"]:
         return finish("no GeoTIFFs downloaded")

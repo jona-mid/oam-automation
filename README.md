@@ -35,7 +35,7 @@ Options: `--dry-run` lists upload candidates from an existing run folder without
 ## How it works
 
 ```
-scrape -> filter -> phenology -> thumbnails/TIFFs -> JPEGs -> VLM check -> upload filter -> duplicate checks -> upload -> ledger
+scrape -> filter -> phenology -> TIFFs -> JPEGs -> VLM check -> upload filter -> duplicate checks -> upload -> ledger
 ```
 
 - **Upload filter:** drone/aircraft imagery under 10 cm GSD, MODIS in season (leaf-on window ±30 days), VLM `leaf_on`. The license comes from the OAM record; images with an unknown license or incomplete metadata are rejected.

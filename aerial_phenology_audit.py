@@ -15,7 +15,6 @@ import csv
 import io
 import json
 import os
-import random
 import re
 import shutil
 import time
@@ -424,8 +423,9 @@ def clean_component(value: object) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)) or "unavailable"
 
 
-def report_phenology(manifest: Path, attempts: Path, output: Path, images: Path) -> None:
-    if images.exists() and any(images.iterdir()):
+def report_phenology(manifest: Path, attempts: Path, output: Path, images: Path | None = None) -> None:
+    """Join reviews to the manifest; with `images`, also copy each JPEG into <category>/<state>/ for browsing."""
+    if images is not None and images.exists() and any(images.iterdir()):
         raise SystemExit(f"Refusing to mix results into non-empty directory: {images}")
     results = latest_by_image(attempts)
     final: list[dict[str, object]] = []
@@ -448,6 +448,8 @@ def report_phenology(manifest: Path, attempts: Path, output: Path, images: Path)
             "visual_cue": review.get("visual_cue", ""), "expected_tree_canopy_leaf_state": expected,
             "modis_alignment": alignment(expected, result)}
         final.append(final_row)
+        if images is None:
+            continue
         source = Path(row["jpeg_path"])
         if not source.is_file() or source.stat().st_size == 0:
             raise SystemExit(f"Manifest JPEG is unreadable or absent: {source}")
@@ -463,7 +465,7 @@ def report_phenology(manifest: Path, attempts: Path, output: Path, images: Path)
         "in_out_agree": sum(row["modis_alignment"] == "agree" for row in final),
         "in_out_disagree": sum(row["modis_alignment"] == "disagree" for row in final),
         "not_assessable": sum(row["modis_alignment"] == "not_assessable" for row in final),
-        "output": str(output), "images": str(images)}
+        "output": str(output), "images": str(images) if images else ""}
     print(json.dumps(summary, indent=2))
 
 
@@ -491,11 +493,11 @@ def parser() -> argparse.ArgumentParser:
                      help="Request a supported hosted-model reasoning level.")
     run.add_argument("--priorities", nargs="+", default=["in_season", "between_season", "out_of_season"])
     run.add_argument("--limit", type=int)
-    report = commands.add_parser("phenology-report", help="Join blind phenology review to MODIS and copy JPEGs")
+    report = commands.add_parser("phenology-report", help="Join blind phenology review to MODIS (optionally copy JPEGs)")
     report.add_argument("--manifest", type=Path, required=True)
     report.add_argument("--attempts", type=Path, required=True)
     report.add_argument("--output", type=Path, required=True)
-    report.add_argument("--images", type=Path, required=True)
+    report.add_argument("--images", type=Path, default=None, help="Copy JPEGs into <images>/<category>/<state>/ for manual browsing")
     return root
 
 
