@@ -127,3 +127,47 @@ def upload_and_process(
     dataset_id = int(dataset["id"])
     dc.process(dataset_id=dataset_id, task_types=TASK_TYPES, priority=PROCESS_PRIORITY)
     return dataset_id
+
+
+def start_processing(dataset_id: int) -> None:
+    """Queue processing for an uploaded dataset (the second half of upload_and_process)."""
+    DataCommands, _, _ = _platform_api()
+    DataCommands().process(dataset_id=dataset_id, task_types=TASK_TYPES, priority=PROCESS_PRIORITY)
+
+
+def find_dataset(filename: str, created_after: str) -> Optional[dict]:
+    """Newest dataset with this file_name created after `created_after` (ISO time), or None.
+
+    For recovery after an upload error: on a slow connection the client can
+    time out although the platform already has the file. Returns
+    {"id": ..., "processing_queued": bool}; queued means a queue row exists
+    or processing already started, finished or failed.
+    """
+    DataCommands, use_client, settings = _platform_api()
+    token = DataCommands()._ensure_auth()
+    with use_client(token) as client:
+        rows = (
+            client.table(settings.datasets_table)
+            .select("id")
+            .eq("file_name", filename)
+            .gte("created_at", created_after)
+            .order("id", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if not rows:
+            return None
+        dataset_id = int(rows[0]["id"])
+        queued = client.table(settings.queue_table).select("id").eq("dataset_id", dataset_id).execute().data
+        status = (
+            client.table(settings.statuses_table)
+            .select("current_status,is_ortho_done,has_error")
+            .eq("dataset_id", dataset_id)
+            .execute()
+            .data
+        )
+    started = bool(status) and (
+        status[0].get("current_status") != "idle" or bool(status[0].get("is_ortho_done")) or bool(status[0].get("has_error"))
+    )
+    return {"id": dataset_id, "processing_queued": bool(queued) or started}

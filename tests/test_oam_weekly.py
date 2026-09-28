@@ -950,13 +950,73 @@ class TestMainRecoveryAndManifestChecks:
             raise RuntimeError("platform down")
 
         monkeypatch.setattr(oam_weekly.deadtrees_seam, "upload_and_process", failing_upload)
+        monkeypatch.setattr(oam_weekly.deadtrees_seam, "find_dataset", lambda name, created_after: None)
         result = oam_weekly.main(self._argv(tmp_path, []))
         assert result == 1
         text = status.read_text(encoding="utf-8")
         # The scrape saw 2026-09-19, but a failed run must not move the chain.
         assert "scrape_uploaded_at: 2026-09-06" in text
         assert "failed: 1" in text
+        assert not (tmp_path / "ledger.csv").exists()
         assert "next scheduled run retries it" in capsys.readouterr().out
+
+    _KWARGS = {"authors": ["x"], "license": "CC BY", "platform": "drone", "data_access": "public",
+               "acquisition_year": 2026, "acquisition_month": 9, "acquisition_day": 1,
+               "additional_information": "x", "citation_doi": None}
+
+    def _timed_out_upload(self, tmp_path, monkeypatch, found):
+        self._seed_dir(tmp_path, {"uploaded_after_date": "2026-09-06", "uploaded_before_date": "None"})
+        self._seed_chain(tmp_path)
+        spec = oam_weekly.UploadSpec("a.tif", tmp_path / "a.tif", self._KWARGS)
+        self._stub_pipeline(monkeypatch, oam_weekly.Preparation(1, [spec], 0))
+
+        def timed_out(tif_path, **kwargs):
+            raise TimeoutError("The read operation timed out")
+
+        monkeypatch.setattr(oam_weekly.deadtrees_seam, "upload_and_process", timed_out)
+        monkeypatch.setattr(oam_weekly.deadtrees_seam, "find_dataset", lambda name, created_after: found)
+        processed = []
+        monkeypatch.setattr(oam_weekly.deadtrees_seam, "start_processing", processed.append)
+        return processed
+
+    def test_upload_error_after_the_file_landed_still_records_it(self, tmp_path, monkeypatch, capsys):
+        processed = self._timed_out_upload(tmp_path, monkeypatch, {"id": 42, "processing_queued": True})
+        result = oam_weekly.main(self._argv(tmp_path, []))
+        assert result == 0
+        assert processed == []
+        assert oam_weekly.load_ledger_filenames(tmp_path / "ledger.csv") == {"a.tif"}
+        text = (tmp_path / "last_run.txt").read_text(encoding="utf-8")
+        assert "uploaded: 1" in text and "failed: 0" in text
+        assert "on the platform as dataset 42" in capsys.readouterr().out
+
+    def test_landed_upload_without_queued_processing_gets_it_started(self, tmp_path, monkeypatch):
+        processed = self._timed_out_upload(tmp_path, monkeypatch, {"id": 42, "processing_queued": False})
+        assert oam_weekly.main(self._argv(tmp_path, [])) == 0
+        assert processed == [42]
+        assert oam_weekly.load_ledger_filenames(tmp_path / "ledger.csv") == {"a.tif"}
+
+    def test_landed_upload_whose_processing_cannot_start_fails_the_run(self, tmp_path, monkeypatch, capsys):
+        self._timed_out_upload(tmp_path, monkeypatch, {"id": 42, "processing_queued": False})
+
+        def broken(dataset_id):
+            raise RuntimeError("still offline")
+
+        monkeypatch.setattr(oam_weekly.deadtrees_seam, "start_processing", broken)
+        assert oam_weekly.main(self._argv(tmp_path, [])) == 1
+        # On the platform, so in the ledger; the run fails so someone starts processing.
+        assert oam_weekly.load_ledger_filenames(tmp_path / "ledger.csv") == {"a.tif"}
+        assert "start it by hand for dataset 42" in capsys.readouterr().out
+
+    def test_failed_recovery_lookup_counts_as_a_failed_upload(self, tmp_path, monkeypatch, capsys):
+        self._timed_out_upload(tmp_path, monkeypatch, None)
+
+        def offline(name, created_after):
+            raise ConnectionError("offline")
+
+        monkeypatch.setattr(oam_weekly.deadtrees_seam, "find_dataset", offline)
+        assert oam_weekly.main(self._argv(tmp_path, [])) == 1
+        assert not (tmp_path / "ledger.csv").exists()
+        assert "could not check whether the failed upload landed" in capsys.readouterr().out
 
     def test_max_uploads_uploads_a_batch_and_holds_chain(self, tmp_path, monkeypatch, capsys):
         self._seed_dir(tmp_path, {"uploaded_after_date": "2026-09-06", "uploaded_before_date": "None"})

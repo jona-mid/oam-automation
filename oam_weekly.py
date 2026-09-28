@@ -431,6 +431,65 @@ def append_ledger_row(csv_path: Path, filename: str, kwargs: dict) -> None:
         )
 
 
+RECOVERY_CLOCK_MARGIN_MINUTES = 10
+
+
+def recover_failed_upload(spec: UploadSpec, started: datetime, error: Exception) -> Optional[tuple]:
+    """After an upload error, check whether the file reached the platform anyway.
+
+    On a slow connection the client can time out after the platform already
+    has the file, sometimes after processing was queued too. Such an upload
+    must still get its ledger row, or the ledger silently misses it. Returns
+    (dataset_id, processing_ok) when the file landed, starting processing if
+    it was never queued; None when it did not land or the lookup fails.
+    """
+    since = started - pd.Timedelta(minutes=RECOVERY_CLOCK_MARGIN_MINUTES)  # local vs. server clock
+    try:
+        found = deadtrees_seam.find_dataset(spec.filename, created_after=since.isoformat())
+    except Exception as lookup_error:
+        print(f"  ! {spec.filename}: could not check whether the failed upload landed: {lookup_error}")
+        return None
+    if found is None:
+        return None
+    dataset_id = found["id"]
+    print(f"  ~ {spec.filename}: upload reported an error ({error}), but the file is on the platform as dataset {dataset_id}")
+    if found["processing_queued"]:
+        return dataset_id, True
+    try:
+        deadtrees_seam.start_processing(dataset_id)
+    except Exception as process_error:
+        print(f"  x {spec.filename}: processing was not queued and starting it failed ({process_error}); "
+              f"start it by hand for dataset {dataset_id}")
+        return dataset_id, False
+    print(f"    processing was not queued; started it for dataset {dataset_id}")
+    return dataset_id, True
+
+
+def upload_batch(batch: List[UploadSpec], ledger_csv: Path, counts: RunCounts) -> None:
+    """Upload each spec and append its ledger row; failures are counted, not raised."""
+    for spec in batch:
+        started = datetime.now(timezone.utc)
+        try:
+            dataset_id = deadtrees_seam.upload_and_process(spec.tif_path, **spec.kwargs)
+        except Exception as error:
+            recovered = recover_failed_upload(spec, started, error)
+            if recovered is None:
+                print(f"  x {spec.filename}: upload failed: {error}")
+                counts.failed += 1
+                continue
+            dataset_id, processing_ok = recovered
+            append_ledger_row(ledger_csv, spec.filename, spec.kwargs)
+            print(f"    ledger row appended for dataset {dataset_id}")
+            if processing_ok:
+                counts.uploaded += 1
+            else:
+                counts.failed += 1  # in the ledger, but processing needs a hand
+            continue
+        append_ledger_row(ledger_csv, spec.filename, spec.kwargs)
+        counts.uploaded += 1
+        print(f"  + {spec.filename} uploaded (dataset {dataset_id}), ledger row appended")
+
+
 def write_status(
     path: Path,
     run_dir: Path,
@@ -731,16 +790,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             batch = prep.specs if args.max_uploads is None else prep.specs[: max(args.max_uploads, 0)]
             remaining = len(prep.specs) - len(batch)
-            for spec in batch:
-                try:
-                    dataset_id = deadtrees_seam.upload_and_process(spec.tif_path, **spec.kwargs)
-                except Exception as error:
-                    print(f"  x {spec.filename}: upload failed: {error}")
-                    counts.failed += 1
-                    continue
-                append_ledger_row(args.uploaded_csv, spec.filename, spec.kwargs)
-                counts.uploaded += 1
-                print(f"  + {spec.filename} uploaded (dataset {dataset_id}), ledger row appended")
+            upload_batch(batch, args.uploaded_csv, counts)
             print(
                 f"Summary: {counts.candidates} candidates, {counts.uploaded} uploaded, "
                 f"{counts.failed} failed, {counts.rejected} rejected (bad metadata, not retried)."
