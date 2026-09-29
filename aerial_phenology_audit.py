@@ -31,7 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Image.MAX_IMAGE_PIXELS = None
 PROMPT_VERSION = "phenology-v6"
-PROMPT = """You are checking one aerial image for a dead-tree mapping dataset.
+_PROMPT_BASE = """You are checking one aerial image for a dead-tree mapping dataset.
 Judge only what is visible. You are not told the image's date or location,
 so do not guess them.
 
@@ -51,11 +51,25 @@ Definitions:
   deciduous crowns are bare, autumn-coloured, or not yet leafed out, and
   the surviving vegetation looks dormant too (brown undergrowth or ground
   cover, snow, frost, or dry-season leaf drop).
-- not_assessable: the image cannot support a judgement: little or no tree
+"""
+PROMPTS = {
+    PROMPT_VERSION: _PROMPT_BASE + """- not_assessable: the image cannot support a judgement: little or no tree
   canopy (e.g. buildings, fields, grassland, marsh), canopy too small to see,
   or poor image quality (blurred, heavy stitching artefacts, clouds or haze,
   mostly no-data).
-"""
+""",
+    # aerialmodel.com renders its orthophotos from a 3D mesh, which smears tree
+    # crowns; v6 let most of those through as leaf_on.
+    "aerialmodel-v1": _PROMPT_BASE + """- not_assessable: the image cannot support a judgement: little or no tree
+  canopy (e.g. buildings, fields, grassland, marsh), canopy too small to see,
+  clouds or haze, mostly no-data, blur, or distorted geometry.
+  Distorted geometry means tree crowns smeared or stretched into streaks,
+  melted or warped buildings and roofs, or textures dragged across the
+  ground, as in orthophotos rendered from a 3D mesh. Judge it on the trees:
+  if many tree crowns are smeared or warped, answer not_assessable even
+  when they are green. Ordinary seams or small patches of artefacts are fine.
+""",
+}
 
 MANIFEST_FIELDS = [
     "image_id", "filename", "source_path", "jpeg_path", "gsd_m", "platform",
@@ -280,10 +294,10 @@ def extract_json(content: str) -> dict[str, object]:
 
 
 def api_review(endpoint: str, model: str, api_key: str, encoded_image: str,
-               timeout: int, reasoning_effort: str | None) -> tuple[PhenologyReview, int, str, dict[str, Any]]:
+               timeout: int, reasoning_effort: str | None, prompt: str) -> tuple[PhenologyReview, int, str, dict[str, Any]]:
     body = {"model": model, "temperature": 0, "response_format": {"type": "json_object"},
             "messages": [{"role": "user", "content": [
-                {"type": "text", "text": PROMPT},
+                {"type": "text", "text": prompt},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded_image}"}},
             ]}]}
     if reasoning_effort:
@@ -319,13 +333,13 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
         handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def current_attempts(path: Path) -> list[dict[str, Any]]:
+def current_attempts(path: Path, prompt_version: str = PROMPT_VERSION) -> list[dict[str, Any]]:
     """Attempts made with the current prompt; a prompt change re-reviews every image."""
-    return [row for row in read_attempts(path) if row.get("prompt_version") == PROMPT_VERSION]
+    return [row for row in read_attempts(path) if row.get("prompt_version") == prompt_version]
 
 
-def successful_ids(path: Path) -> set[str]:
-    return {str(row["image_id"]) for row in current_attempts(path) if row.get("status") == "success" and row.get("image_id")}
+def successful_ids(path: Path, prompt_version: str = PROMPT_VERSION) -> set[str]:
+    return {str(row["image_id"]) for row in current_attempts(path, prompt_version) if row.get("status") == "success" and row.get("image_id")}
 
 
 def error_details(exc: Exception) -> tuple[int | None, str]:
@@ -344,13 +358,13 @@ def is_transient(exc: Exception) -> bool:
 
 def run_phenology(manifest: Path, attempts: Path, endpoint: str, model: str, api_key_env: str,
                   timeout: int, max_retries: int, max_side: int, priorities: set[str], limit: int | None,
-                  reasoning_effort: str | None, workers: int) -> None:
+                  reasoning_effort: str | None, workers: int, prompt_version: str = PROMPT_VERSION) -> None:
     if workers < 1:
         raise SystemExit("--workers must be at least 1")
     api_key = os.environ.get(api_key_env)
     if not api_key:
         raise SystemExit(f"Missing API key environment variable: {api_key_env}")
-    completed = successful_ids(attempts)
+    completed = successful_ids(attempts, prompt_version)
     pending = [row for row in read_csv(manifest) if row["image_id"] not in completed and row.get("selection_status") == "pending" and row.get("priority") in priorities]
     if limit is not None:
         pending = pending[:limit]
@@ -366,9 +380,9 @@ def run_phenology(manifest: Path, attempts: Path, endpoint: str, model: str, api
             try:
                 encoded, submitted_image, upload_bytes = image_data(Path(row["jpeg_path"]), max_side)
                 review, latency, returned_model, usage = api_review(endpoint, model, api_key, encoded, timeout,
-                                                                      reasoning_effort)
+                                                                      reasoning_effort, PROMPTS[prompt_version])
                 record: dict[str, Any] = {"status": "success", "at": now, "attempt": attempt, "image_id": row["image_id"],
-                    "requested_model": model, "returned_model": returned_model, "prompt_version": PROMPT_VERSION,
+                    "requested_model": model, "returned_model": returned_model, "prompt_version": prompt_version,
                     "latency_ms": latency, "submitted_image": submitted_image, "max_side": max_side,
                     "upload_bytes": upload_bytes, "upload_base64_bytes": len(encoded),
                     "reasoning_effort": reasoning_effort or "provider_default", "review": review.model_dump(),
@@ -380,7 +394,7 @@ def run_phenology(manifest: Path, attempts: Path, endpoint: str, model: str, api
             except Exception as exc:
                 status, detail = error_details(exc)
                 append_record({"status": "error", "at": now, "attempt": attempt, "image_id": row["image_id"],
-                    "requested_model": model, "prompt_version": PROMPT_VERSION, "submitted_image": submitted_image,
+                    "requested_model": model, "prompt_version": prompt_version, "submitted_image": submitted_image,
                     "reasoning_effort": reasoning_effort or "provider_default", "http_status": status,
                     "error": detail})
                 if not is_transient(exc) or attempt > max_retries:
@@ -396,9 +410,9 @@ def run_phenology(manifest: Path, attempts: Path, endpoint: str, model: str, api
     print(json.dumps({"already_complete": len(completed), "submitted": len(pending), "workers": workers}, indent=2))
 
 
-def latest_by_image(path: Path) -> dict[str, dict[str, Any]]:
+def latest_by_image(path: Path, prompt_version: str = PROMPT_VERSION) -> dict[str, dict[str, Any]]:
     latest: dict[str, dict[str, Any]] = {}
-    for row in current_attempts(path):
+    for row in current_attempts(path, prompt_version):
         if isinstance(row.get("image_id"), str):
             latest[row["image_id"]] = row
     return latest
@@ -423,11 +437,12 @@ def clean_component(value: object) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)) or "unavailable"
 
 
-def report_phenology(manifest: Path, attempts: Path, output: Path, images: Path | None = None) -> None:
+def report_phenology(manifest: Path, attempts: Path, output: Path, images: Path | None = None,
+                     prompt_version: str = PROMPT_VERSION) -> None:
     """Join reviews to the manifest; with `images`, also copy each JPEG into <category>/<state>/ for browsing."""
     if images is not None and images.exists() and any(images.iterdir()):
         raise SystemExit(f"Refusing to mix results into non-empty directory: {images}")
-    results = latest_by_image(attempts)
+    results = latest_by_image(attempts, prompt_version)
     final: list[dict[str, object]] = []
     reviewed_rows = [row for row in read_csv(manifest) if row.get("selection_status") == "pending"]
     for row in reviewed_rows:
@@ -493,11 +508,13 @@ def parser() -> argparse.ArgumentParser:
                      help="Request a supported hosted-model reasoning level.")
     run.add_argument("--priorities", nargs="+", default=["in_season", "between_season", "out_of_season"])
     run.add_argument("--limit", type=int)
+    run.add_argument("--prompt-version", choices=list(PROMPTS), default=PROMPT_VERSION)
     report = commands.add_parser("phenology-report", help="Join blind phenology review to MODIS (optionally copy JPEGs)")
     report.add_argument("--manifest", type=Path, required=True)
     report.add_argument("--attempts", type=Path, required=True)
     report.add_argument("--output", type=Path, required=True)
     report.add_argument("--images", type=Path, default=None, help="Copy JPEGs into <images>/<category>/<state>/ for manual browsing")
+    report.add_argument("--prompt-version", choices=list(PROMPTS), default=PROMPT_VERSION)
     return root
 
 
@@ -508,9 +525,9 @@ def main() -> None:
     elif args.command == "phenology-run":
         run_phenology(args.manifest, args.attempts, args.endpoint, args.model, args.api_key_env,
                       args.timeout, args.max_retries, args.max_side, set(args.priorities), args.limit,
-                      args.reasoning_effort, args.workers)
+                      args.reasoning_effort, args.workers, args.prompt_version)
     else:
-        report_phenology(args.manifest, args.attempts, args.output, args.images)
+        report_phenology(args.manifest, args.attempts, args.output, args.images, args.prompt_version)
 
 
 if __name__ == "__main__":

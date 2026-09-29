@@ -191,7 +191,8 @@ class TestMain:
             for _, row in rows.iterrows():
                 (tifs / row["filename"]).write_bytes(b"tif")
 
-        def fake_vlm(output, *args):
+        def fake_vlm(output, *args, prompt_version):
+            assert prompt_version == "aerialmodel-v1"
             with (output / "metadata" / "phenology_report.csv").open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.writer(handle)
                 writer.writerow(REPORT_FIELDS)

@@ -32,7 +32,7 @@ def csv_rows(path):
 
 
 def run_vlm_stages(output, tifs, jpegs, pheno_csv, tif_metadata, endpoint, model, workers,
-                   api_key_env="OPENROUTER_API_KEY"):
+                   api_key_env="OPENROUTER_API_KEY", prompt_version="phenology-v6"):
     """Audit manifest -> VLM review -> report into `output`; returns the manifest stage entries.
 
     Skipped when metadata/phenology_report.csv exists. Fails (SystemExit) when
@@ -46,9 +46,9 @@ def run_vlm_stages(output, tifs, jpegs, pheno_csv, tif_metadata, endpoint, model
         if not audit_manifest_csv.exists():
             run("aerial_phenology_audit.py", "manifest", "--source", tifs, "--jpegs", jpegs, "--phenology", pheno_csv, "--metadata", tif_metadata, "--output", audit_manifest_csv, cwd=output)
 
-        run("aerial_phenology_audit.py", "phenology-run", "--manifest", audit_manifest_csv, "--attempts", vlm_attempts, "--endpoint", endpoint, "--model", model, "--api-key-env", api_key_env, "--workers", workers, "--priorities", "in_season", cwd=output)
+        run("aerial_phenology_audit.py", "phenology-run", "--manifest", audit_manifest_csv, "--attempts", vlm_attempts, "--endpoint", endpoint, "--model", model, "--api-key-env", api_key_env, "--workers", workers, "--priorities", "in_season", "--prompt-version", prompt_version, cwd=output)
 
-        run("aerial_phenology_audit.py", "phenology-report", "--manifest", audit_manifest_csv, "--attempts", vlm_attempts, "--output", vlm_report_csv, cwd=output)
+        run("aerial_phenology_audit.py", "phenology-report", "--manifest", audit_manifest_csv, "--attempts", vlm_attempts, "--output", vlm_report_csv, "--prompt-version", prompt_version, cwd=output)
 
         # phenology-run records API errors (bad key, no credits, outages) and
         # exits 0. Those images would silently fall out of the upload gate, so

@@ -432,7 +432,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             pheno_csv, tif_metadata = metadata / "phenology.csv", metadata / "tif_metadata.csv"
             write_audit_inputs(eligible, tifs, pheno_csv, tif_metadata)
             endpoint, model, key_env = vlm_settings()
-            pipeline.run_vlm_stages(run_dir, tifs, jpegs, pheno_csv, tif_metadata, endpoint, model, VLM_WORKERS, key_env)
+            pipeline.run_vlm_stages(run_dir, tifs, jpegs, pheno_csv, tif_metadata, endpoint, model, VLM_WORKERS, key_env,
+                                    prompt_version="aerialmodel-v1")
 
         gate = load_gate(run_dir)
         ledger = oam_weekly.load_ledger_filenames(args.uploaded_csv)
