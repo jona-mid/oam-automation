@@ -59,14 +59,14 @@ def _jpeg(path, size, box=None):
 
 def test_mostly_black_preview_is_excluded(tmp_path):
     path = _jpeg(tmp_path / "a.jpeg", (1200, 1200), box=(0, 0, 200, 200))  # ~3% image
-    assert audit.preview_info(path, 1000)[0] == "mostly_nodata"
+    assert audit.preview_info(path, 200)[0] == "mostly_nodata"
 
 
 def test_preview_with_enough_image_is_eligible(tmp_path):
     path = _jpeg(tmp_path / "b.jpeg", (1200, 1200), box=(0, 0, 600, 1200))  # 50% image
-    assert audit.preview_info(path, 1000)[0] == "eligible"
+    assert audit.preview_info(path, 200)[0] == "eligible"
 
 
-def test_small_preview_is_still_too_small(tmp_path):
-    path = _jpeg(tmp_path / "c.jpeg", (400, 400), box=(0, 0, 400, 400))
-    assert audit.preview_info(path, 1000)[0] == "too_small"
+def test_small_site_is_excluded(tmp_path):
+    path = _jpeg(tmp_path / "c.jpeg", (400, 400), box=(0, 0, 400, 400))  # 80 m at 20 cm
+    assert audit.preview_info(path, 200)[0] == "site_too_small"

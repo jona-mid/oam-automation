@@ -179,6 +179,8 @@ def jpeg_dimensions_from_header(path: Path) -> tuple[int, int]:
             handle.seek(segment_length - 2, io.SEEK_CUR)
 
 
+PREVIEW_RESOLUTION_M = 0.2  # tif_to_jpeg.TARGET_RESOLUTION_M: every preview is rendered at 20 cm
+MIN_SITE_EXTENT_M = 200  # sites whose long side is shorter on the ground are out of scope
 MIN_IMAGE_SHARE = 0.10  # below this share of real (non-black, non-white) pixels the frame is mostly no-data
 
 
@@ -195,16 +197,20 @@ def image_share(path: Path) -> float:
         return float(1 - empty.mean())
 
 
-def preview_info(path: Path | None, minimum_long_edge: int) -> tuple[str, int | None, int | None, int | None, int | None]:
-    """Read preview dimensions and bytes; decode a reduced copy only to reject mostly-empty frames."""
+def preview_info(path: Path | None, min_site_extent_m: float) -> tuple[str, int | None, int | None, int | None, int | None]:
+    """Read preview dimensions and bytes; reject small sites and mostly-empty frames.
+
+    The size check is about ground coverage, not image resolution: previews share
+    one resolution, so the long edge in pixels gives the site's long side in metres.
+    """
     try:
         if path is None or not path.is_file() or path.stat().st_size == 0:
             return "missing_or_zero", None, None, None, None
         file_bytes = path.stat().st_size
         width, height = jpeg_dimensions_from_header(path)
         long_edge = max(width, height)
-        if long_edge < minimum_long_edge:
-            return "too_small", width, height, long_edge, file_bytes
+        if long_edge * PREVIEW_RESOLUTION_M < min_site_extent_m:
+            return "site_too_small", width, height, long_edge, file_bytes
         # The VLM only sometimes flags frames that are almost all no-data, so
         # decide those deterministically and never send them.
         if image_share(path) < MIN_IMAGE_SHARE:
@@ -215,7 +221,7 @@ def preview_info(path: Path | None, minimum_long_edge: int) -> tuple[str, int | 
 
 
 def make_manifest(source_dir: Path, jpeg_dir: Path, phenology: Path, metadata: Path,
-                  output: Path, min_preview_long_edge: int = 1000) -> None:
+                  output: Path, min_site_extent_m: float = MIN_SITE_EXTENT_M) -> None:
     jpgs = image_index(jpeg_dir)
     pheno = {row.get("filename", "").lower(): row for row in read_csv(phenology)}
     meta = metadata_index(metadata)
@@ -226,7 +232,7 @@ def make_manifest(source_dir: Path, jpeg_dir: Path, phenology: Path, metadata: P
         p, m = pheno.get(name.lower(), {}), meta.get(name.lower(), {})
         jpeg_name = p.get("jpeg_filename") or f"{name}.jpeg"
         jpg = jpgs.get(jpeg_name.lower())
-        preview_status, width, height, long_edge, file_bytes = preview_info(jpg, min_preview_long_edge)
+        preview_status, width, height, long_edge, file_bytes = preview_info(jpg, min_site_extent_m)
         gsd = parse_number(m.get("gsd") or m.get("properties.resolution_in_meters"))
         category = p.get("classification") or "unknown"
         priority = category if category in {"in_season", "between_season", "out_of_season"} else "unknown"
@@ -268,7 +274,7 @@ def make_manifest(source_dir: Path, jpeg_dir: Path, phenology: Path, metadata: P
                       "duplicates": sum(bool(row["duplicate_of"]) for row in rows),
                       "excluded_preview": sum(row["selection_status"] == "excluded_preview" for row in rows),
                       "eligible_for_api": sum(row["selection_status"] == "pending" for row in rows),
-                      "min_preview_long_edge": min_preview_long_edge}, indent=2))
+                      "min_site_extent_m": min_site_extent_m}, indent=2))
 
 
 def image_data(path: Path, max_side: int = 2048) -> tuple[str, str, int]:
@@ -493,7 +499,8 @@ def parser() -> argparse.ArgumentParser:
     manifest.add_argument("--phenology", type=Path, required=True)
     manifest.add_argument("--metadata", type=Path, required=True)
     manifest.add_argument("--output", type=Path, required=True)
-    manifest.add_argument("--min-preview-long-edge", type=int, default=1000)
+    manifest.add_argument("--min-site-extent-m", type=float, default=MIN_SITE_EXTENT_M,
+                          help="drop sites whose long side on the ground is shorter (metres)")
     run = commands.add_parser("phenology-run", help="Blind visible tree-canopy phenology review")
     run.add_argument("--manifest", type=Path, required=True)
     run.add_argument("--attempts", type=Path, required=True)
@@ -521,7 +528,7 @@ def parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = parser().parse_args()
     if args.command == "manifest":
-        make_manifest(args.source, args.jpegs, args.phenology, args.metadata, args.output, args.min_preview_long_edge)
+        make_manifest(args.source, args.jpegs, args.phenology, args.metadata, args.output, args.min_site_extent_m)
     elif args.command == "phenology-run":
         run_phenology(args.manifest, args.attempts, args.endpoint, args.model, args.api_key_env,
                       args.timeout, args.max_retries, args.max_side, set(args.priorities), args.limit,
