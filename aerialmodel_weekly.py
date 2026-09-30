@@ -438,7 +438,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         gate = load_gate(run_dir)
         ledger = oam_weekly.load_ledger_filenames(args.uploaded_csv)
         prep = oam_weekly.prepare_candidates(
-            gate, ledger, run_dir, server_check=not args.skip_server_check, build_kwargs=build_aerialmodel_kwargs
+            gate, ledger, run_dir, server_check=not args.skip_server_check, build_kwargs=build_aerialmodel_kwargs,
+            # started_at is written with the catalog fetch
+            accessed=date.fromisoformat(manifest["started_at"][:10]) if manifest.get("started_at") else None,
         )
         counts.candidates, counts.rejected = prep.candidates, prep.rejected
         print(f"Gate passed {len(gate)} images; {prep.candidates} left after dedup (ledger, platform file_name, content hash).")

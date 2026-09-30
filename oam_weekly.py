@@ -73,6 +73,11 @@ def format_en_date(value: date) -> str:
     return f"{value:%B} {value.day}, {value:%Y}"
 
 
+def file_date(path: Path) -> date:
+    """Local date a file was written: the "Accessed" date for metadata scraped into it; today if missing."""
+    return date.fromtimestamp(path.stat().st_mtime) if path.exists() else date.today()
+
+
 def run_pipeline(
     repo_root: Path,
     run_dir: Path,
@@ -602,12 +607,16 @@ def prepare_candidates(
     run_dir: Path,
     server_check: bool,
     build_kwargs=build_upload_kwargs,
+    accessed: Optional[date] = None,
 ) -> Preparation:
     """Diff gate rows against the ledger and the platform, then build upload specs.
 
     `build_kwargs(row, run_date, tif_path)` turns a gate row into upload kwargs;
-    it raises to reject a candidate (the OAM builder by default).
+    it raises to reject a candidate (the OAM builder by default). `accessed`
+    is the scrape date cited as "Accessed" (default today); uploads from a
+    reused run dir happen days after the scrape.
     """
+    accessed = accessed or date.today()
     candidates = [
         row for _, row in gate.iterrows() if normalize_filename(row["filename"]) not in ledger
     ]
@@ -676,7 +685,7 @@ def prepare_candidates(
             rejected += 1
             continue
         try:
-            kwargs = build_kwargs(row, date.today(), tif_path)
+            kwargs = build_kwargs(row, accessed, tif_path)
         except Exception as error:
             print(f"  ! {filename}: candidate rejected ({error}), skipping")
             rejected += 1
@@ -775,7 +784,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         gate = load_gate_candidates(run_dir)
         ledger = load_ledger_filenames(args.uploaded_csv)
-        prep = prepare_candidates(gate, ledger, run_dir, server_check=not args.skip_server_check)
+        prep = prepare_candidates(gate, ledger, run_dir, server_check=not args.skip_server_check,
+                                  accessed=file_date(run_dir / "raw" / "openaerial_data.csv"))
         counts.candidates = prep.candidates
         counts.rejected = prep.rejected
         print(f"Gate passed {len(gate)} images; {prep.candidates} left after dedup (ledger, platform file_name, content hash).")

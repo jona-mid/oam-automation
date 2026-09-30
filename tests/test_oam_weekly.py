@@ -270,7 +270,7 @@ class TestMain:
 
         monkeypatch.setattr(oam_weekly, "run_pipeline", fake_run_pipeline)
         monkeypatch.setattr(oam_weekly, "load_gate_candidates", lambda run_dir: pd.DataFrame())
-        monkeypatch.setattr(oam_weekly, "prepare_candidates", lambda gate, ledger, run_dir, server_check: prep)
+        monkeypatch.setattr(oam_weekly, "prepare_candidates", lambda gate, ledger, run_dir, server_check, **kwargs: prep)
 
     def _status(self, tmp_path):
         return (tmp_path / "last_run.txt").read_text(encoding="utf-8")
