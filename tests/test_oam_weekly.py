@@ -103,7 +103,6 @@ def test_bad_metadata_fails_closed():
         ({"acquisition_date": "2026-07-08", "title": "Lowes  New Paltz May 16, 2022"},
          "title date 2022-05-16 contradicts capture date 2026-07-08"),
         ({"acquisition_date": "2026-01-24", "title": "WattleBay_260710"}, "title date 2026-07-10"),
-        ({"acquisition_date": "2016-01-01", "acquisition_start": "2016-01-01T08:00:00.000Z"}, "placeholder"),
         ({"uploaded_at": "2026-08-01T10:00:00.000Z"}, "after the OAM upload"),
     ]
     for overrides, message in cases:
@@ -133,8 +132,6 @@ def test_title_date_check_tolerances():
         oam_weekly.check_title_date(title, capture, uploaded)
     with pytest.raises(ValueError):
         oam_weekly.check_title_date("Hurricane Melissa 2025-10-28", date(2025, 6, 1))
-    assert not oam_weekly.is_placeholder_timestamp("2026-01-01T09:13:22.000Z")
-    assert oam_weekly.is_placeholder_timestamp("2013-12-31T16:00:00.000Z")  # midnight east of Greenwich
 
 
 def test_tiff_processing_date_check(tmp_path):
@@ -390,6 +387,35 @@ class TestMain:
         assert oam_weekly.main(self._argv(tmp_path)) == 1
         assert not (tmp_path / "ledger.csv").exists()
         assert "could not check whether the failed upload landed" in capsys.readouterr().out
+
+    def _duplicate_upload(self, tmp_path, monkeypatch, dataset_id):
+        from shared.upload_duplicates import DuplicateUploadError
+
+        self._seed(tmp_path)
+        self._stub(monkeypatch, oam_weekly.Preparation(1, [oam_weekly.UploadSpec("a.tif", tmp_path / "a.tif", self.KWARGS)], 0))
+
+        def rejecting(tif_path, **kwargs):
+            raise DuplicateUploadError(dataset_id)
+
+        monkeypatch.setattr(deadtrees_seam, "upload_and_process", rejecting)
+        # A pre-existing duplicate was not created by this run, so the recovery
+        # lookup must not be consulted for a duplicate rejection at all.
+        monkeypatch.setattr(deadtrees_seam, "find_dataset", lambda *a, **k: (_ for _ in ()).throw(AssertionError("recovery lookup ran")))
+
+    def test_duplicate_rejection_skips_and_completes_the_ledger(self, tmp_path, monkeypatch, capsys):
+        self._duplicate_upload(tmp_path, monkeypatch, 42)
+        assert oam_weekly.main(self._argv(tmp_path)) == 0
+        assert oam_weekly.load_ledger_filenames(tmp_path / "ledger.csv") == {"a.tif"}
+        status = self._status(tmp_path)
+        assert "skipped: 1" in status and "failed: 0" in status
+        assert "already on the platform as dataset 42" in capsys.readouterr().out
+
+    def test_duplicate_rejection_without_a_visible_dataset_keeps_the_ledger(self, tmp_path, monkeypatch, capsys):
+        self._duplicate_upload(tmp_path, monkeypatch, None)
+        assert oam_weekly.main(self._argv(tmp_path)) == 0
+        assert oam_weekly.load_ledger_filenames(tmp_path / "ledger.csv") == {"a.tif"}
+        assert "skipped: 1" in self._status(tmp_path) and "failed: 0" in self._status(tmp_path)
+        assert "not visible to you" in capsys.readouterr().out
 
     def test_max_uploads_uploads_a_batch_and_holds_the_chain(self, tmp_path, monkeypatch, capsys):
         self._seed(tmp_path)

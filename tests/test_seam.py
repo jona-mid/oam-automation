@@ -160,3 +160,13 @@ def test_find_dataset_counts_finished_processing_as_queued(monkeypatch):
 def test_find_dataset_returns_none_when_the_file_did_not_land(monkeypatch):
     _fake_platform(monkeypatch, {"datasets": [{"id": 7, "file_name": "other.tif"}]})
     assert deadtrees_seam.find_dataset("a.tif", "2026-09-28") is None
+
+
+def test_duplicate_upload_detail_recognizes_the_rejection():
+    from shared.upload_duplicates import DuplicateUploadError
+
+    duplicate = deadtrees_seam.duplicate_upload_detail(DuplicateUploadError(42))
+    assert duplicate["code"] == "DUPLICATE_UPLOAD" and duplicate["existing_dataset_id"] == 42
+    hidden = deadtrees_seam.duplicate_upload_detail(DuplicateUploadError(None))
+    assert hidden["existing_dataset_id"] is None
+    assert deadtrees_seam.duplicate_upload_detail(RuntimeError("platform down")) is None

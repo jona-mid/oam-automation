@@ -44,6 +44,7 @@ scrape -> filter -> phenology -> TIFFs -> JPEGs -> VLM check -> upload filter ->
 ## Operations
 
 - **Failed runs:** a crash, VLM/OpenRouter errors or failed downloads/uploads leave the start date in `last_run.txt` unchanged, so the next run retries automatically. To retry now, re-run into the same `--output-dir`; completed steps and files are skipped. A problem that persists (e.g. an image that never downloads) fails every run until someone looks. Images rejected for bad metadata, and TIFFs that cannot be converted, are dropped with a log line and don't block anything.
+- **Server-side duplicate rejection:** since the platform dedups uploads, `deadtrees-upload` raises a duplicate error when the file is already there. The pipeline treats this as a skip, not a failure: the ledger gets its row, the count lands in `skipped:` in `last_run.txt`, and nothing is retried or uploaded again.
 - **Skipping a period on purpose:** edit `scrape_uploaded_at` in `last_run.txt`.
 - **Earth Engine forest filter:** kept but off; the weekly run never enables it (see `pipeline.py --forest-min/--forest-max`).
 - **Tests:** `pip install pytest && python -m pytest` (no network or credentials needed).

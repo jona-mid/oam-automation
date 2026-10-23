@@ -129,6 +129,25 @@ def upload_and_process(
     return dataset_id
 
 
+def duplicate_upload_detail(error: Exception) -> Optional[dict]:
+    """The API detail dict when `error` is the platform's duplicate-upload rejection.
+
+    Since the upload CLI (and thus upload_and_process) was updated, the API
+    and the client pre-check raise `shared.upload_duplicates.DuplicateUploadError`
+    when a non-archived dataset already holds the file. Its detail carries the
+    existing dataset's id, or None when the caller may not see that dataset.
+    Returns None for any other error (and when the platform stack is not
+    installed, so callers without it still get plain exception handling).
+    """
+    try:
+        from shared.upload_duplicates import DuplicateUploadError
+    except ImportError:
+        return None
+    if isinstance(error, DuplicateUploadError):
+        return error.detail
+    return None
+
+
 def start_processing(dataset_id: int) -> None:
     """Queue processing for an uploaded dataset (the second half of upload_and_process)."""
     DataCommands, _, _ = _platform_api()

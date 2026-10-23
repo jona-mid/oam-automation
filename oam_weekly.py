@@ -49,12 +49,14 @@ class RunCounts:
     uploaded: int = 0
     failed: int = 0
     rejected: int = 0
+    skipped: int = 0  # already on the platform; the server rejected the upload as a duplicate
 
 
 class UploadSpec(NamedTuple):
     filename: str
     tif_path: Path
     kwargs: dict
+    file_hash: Optional[str] = None  # content hash from the dedup leg, for upload-error diagnosis
 
 
 @dataclass
@@ -306,20 +308,6 @@ def check_title_date(title, acquisition: date, uploaded: Optional[date] = None) 
 TIFF_DATE_TOLERANCE_DAYS = 30
 
 
-def is_placeholder_timestamp(raw) -> bool:
-    """A capture time of exactly local midnight on January 1: only the year was known.
-
-    Stored in UTC, local midnight shows up as a whole hour on Jan 1 (west of
-    Greenwich) or on Dec 31 from 10:00 (east of it).
-    """
-    stamp = pd.to_datetime(raw, utc=True, errors="coerce")
-    if pd.isna(stamp) or stamp.minute or stamp.second or stamp.microsecond:
-        return False
-    return (stamp.month == 1 and stamp.day == 1 and stamp.hour <= 14) or (
-        stamp.month == 12 and stamp.day == 31 and stamp.hour >= 10
-    )
-
-
 def tiff_processing_date(tif_path: Path) -> Optional[date]:
     """TIFFTAG_DATETIME as written by ODM, Pix4D, etc. when the orthophoto was processed."""
     import rasterio
@@ -343,22 +331,19 @@ def tiff_processing_date(tif_path: Path) -> Optional[date]:
 def check_capture_date(row: pd.Series, acquisition: date, tif_path: Optional[Path] = None) -> None:
     """Fail closed on capture dates that the metadata or the file itself contradicts.
 
-    A wrong capture date both misleads the season check and lands on the
-    platform, so each signal rejects the candidate (logged, counted as
-    rejected, never uploaded):
+    These signals mostly mean the year is wrong too, which the platform's
+    automated date check cannot reliably fix, so each rejects the candidate
+    (logged, counted as rejected, never uploaded):
     - capture after the OAM upload (impossible)
-    - placeholder date (Jan 1, local midnight): the season is unknown
     - a date in the title that contradicts the capture date
     - a TIFF processing date well before the capture date (impossible)
+    Day-only placeholders (Jan 1) pass: the year is known and the platform
+    suggests the date.
     """
     uploaded = pd.to_datetime(row.get("uploaded_at"), utc=True, errors="coerce")
     if not pd.isna(uploaded) and (acquisition - uploaded.date()).days > 1:
         raise ValueError(
             f"capture date {acquisition.isoformat()} is after the OAM upload {uploaded.date().isoformat()}"
-        )
-    if is_placeholder_timestamp(row.get("acquisition_start")):
-        raise ValueError(
-            f"capture date {acquisition.isoformat()} is a placeholder (Jan 1, no time of day)"
         )
     check_title_date(row.get("title"), acquisition, None if pd.isna(uploaded) else uploaded.date())
     if tif_path is not None:
@@ -477,6 +462,20 @@ def upload_batch(batch: List[UploadSpec], ledger_csv: Path, counts: RunCounts) -
         try:
             dataset_id = deadtrees_seam.upload_and_process(spec.tif_path, **spec.kwargs)
         except Exception as error:
+            # A duplicate rejection is not a failure: the file is already on
+            # the platform (the server checks its content fingerprint), so
+            # the ledger gets its row and nothing is retried. Checked before
+            # recover_failed_upload, which only finds datasets created after
+            # this upload started and would miss a pre-existing duplicate.
+            duplicate = deadtrees_seam.duplicate_upload_detail(error)
+            if duplicate is not None:
+                existing = duplicate.get("existing_dataset_id")
+                where = f"dataset {existing}" if existing is not None else "an existing dataset (not visible to you)"
+                append_ledger_row(ledger_csv, spec.filename, spec.kwargs)
+                counts.skipped += 1
+                print(f"  = {spec.filename}: already on the platform as {where}; "
+                      f"no second copy was created, ledger row appended")
+                continue
             recovered = recover_failed_upload(spec, started, error)
             if recovered is None:
                 print(f"  x {spec.filename}: upload failed: {error}")
@@ -519,6 +518,7 @@ def write_status(
         f"candidates: {counts.candidates}",
         f"uploaded: {counts.uploaded}",
         f"failed: {counts.failed}",
+        f"skipped: {counts.skipped}",
         f"rejected: {counts.rejected}",
         f"exit: {exit_status}",
     ]
@@ -690,7 +690,8 @@ def prepare_candidates(
             print(f"  ! {filename}: candidate rejected ({error}), skipping")
             rejected += 1
             continue
-        specs.append(UploadSpec(filename=filename, tif_path=tif_path, kwargs=kwargs))
+        specs.append(UploadSpec(filename=filename, tif_path=tif_path, kwargs=kwargs,
+                                file_hash=hashes.get(filename)))
     return Preparation(candidates=len(candidates), specs=specs, rejected=rejected)
 
 
@@ -803,8 +804,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             upload_batch(batch, args.uploaded_csv, counts)
             print(
                 f"Summary: {counts.candidates} candidates, {counts.uploaded} uploaded, "
-                f"{counts.failed} failed, {counts.rejected} rejected (bad metadata, not retried)."
+                f"{counts.failed} failed, {counts.skipped} skipped (already on the platform), "
+                f"{counts.rejected} rejected (bad metadata, not retried)."
             )
+            if counts.skipped:
+                print(f"  {counts.skipped} upload(s) skipped: the platform already holds these files.")
             exit_status = "success" if counts.failed == 0 else "failed"
             if remaining and exit_status == "success":
                 # Not a failure, but the window is not done: hold it like one.
