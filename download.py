@@ -50,8 +50,10 @@ def main(argv=None):
 
     tasks = []
     skipped = 0
-    for url in df["uuid"].dropna().drop_duplicates():
-        tif_filename = extract_filename_from_url(url, ".tif")
+    rows = df.dropna(subset=["uuid"]).drop_duplicates("uuid")
+    for url, name in zip(rows["uuid"], rows.get("filename", [None] * len(rows))):
+        # phenology.py's `filename` column wins (STAC uploads are named by item id).
+        tif_filename = name if isinstance(name, str) and name else extract_filename_from_url(url, ".tif")
         output_path = os.path.join(args.output_dir, tif_filename)
         if tif_filename in downloaded_files and os.path.exists(output_path):
             skipped += 1

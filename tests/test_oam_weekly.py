@@ -85,10 +85,11 @@ def test_upload_kwargs_match_the_seam():
     assert kwargs["additional_information"] == (
         "This orthophoto data is available through OpenAerialMap, provided by Contributors "
         "of Open Imagery Network. Licensed under CC-BY 4.0. More information about this "
-        "dataset: https://api.openaerialmap.org/meta?_id=abc123 Accessed September 21, 2026."
+        "dataset: https://api.imagery.hotosm.org/stac/collections/openaerialmap/items/abc123 Accessed September 21, 2026."
     )
     sa = oam_weekly.build_upload_kwargs(_row(property_license="CC BY-SA 4.0"), TODAY)
     assert sa["license"] == "CC BY-SA" and "Licensed under CC BY-SA 4.0." in sa["additional_information"]
+    assert oam_weekly.build_upload_kwargs(_row(property_license="CC-BY-4.0"), TODAY)["license"] == "CC BY"  # STAC spelling
     # main spreads these kwargs into the seam, so the keys must match its parameters.
     assert {"file_path", *kwargs} == set(inspect.signature(deadtrees_seam.upload_and_process).parameters)
 

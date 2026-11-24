@@ -381,7 +381,7 @@ def build_upload_kwargs(row: pd.Series, run_date: date, tif_path: Optional[Path]
     additional = (
         "This orthophoto data is available through OpenAerialMap, provided by Contributors "
         f"of Open Imagery Network. Licensed under {raw_license}. More information about this "
-        f"dataset: https://api.openaerialmap.org/meta?_id={str(oam_id).strip()} "
+        f"dataset: https://api.imagery.hotosm.org/stac/collections/openaerialmap/items/{str(oam_id).strip()} "
         f"Accessed {format_en_date(run_date)}."
     )
     return {

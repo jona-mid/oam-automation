@@ -24,6 +24,11 @@ OAM_LICENSE_MAP = {
     "CC BY-NC 4.0": "CC BY-NC",
     "CC BY-NC-SA 4.0": "CC BY-NC-SA",
     "MIT": "MIT",
+    # STAC catalog (api.imagery.hotosm.org) spelling
+    "CC-BY-4.0": "CC BY",
+    "CC-BY-SA-4.0": "CC BY-SA",
+    "CC-BY-NC-4.0": "CC BY-NC",
+    "CC-BY-NC-SA-4.0": "CC BY-NC-SA",
 }
 
 
