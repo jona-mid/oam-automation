@@ -160,6 +160,7 @@ class TestPrepareCandidates:
     def _offline(self, monkeypatch):
         monkeypatch.setattr(deadtrees_seam, "file_hash", lambda path: "hash-" + path.name.lower())
         monkeypatch.setattr(deadtrees_seam, "file_hashes_on_platform", lambda hashes: {})
+        monkeypatch.setattr(deadtrees_seam, "platform_footprints", lambda: [])
 
     def _tifs(self, tmp_path, *names, content=None):
         (tmp_path / "tifs").mkdir(exist_ok=True)
@@ -177,6 +178,22 @@ class TestPrepareCandidates:
         # a: new; b: name on platform; c: hash on platform; e: same content as d; z: in the ledger.
         assert [spec.filename for spec in prep.specs] == ["a.tif", "d.tif"]
         assert prep.rejected == 0
+
+    def test_possible_copies_are_held(self, tmp_path, monkeypatch):
+        rows = [  # filename, bbox, capture date
+            ("a.tif", "[0, 0, 1, 1]", "2026-09-11"),  # held: same area and month as platform dataset 7
+            ("b.tif", "[0, 0, 1, 1]", "2025-09-11"),  # kept: a year apart, a new time point
+            ("c.tif", "[5, 5, 7, 7]", "2026-09-11"),  # kept: the larger of c/d (a mosaic)
+            ("d.tif", "[5, 5, 6, 6]", "2026-09-12"),  # held: inside c, a day later
+            ("e.tif", "[0, 0, 1, 1]", "2026-09-11"),  # kept: like a, but allowed after a look
+        ]
+        self._tifs(tmp_path, *(name for name, _, _ in rows))
+        monkeypatch.setattr(deadtrees_seam, "file_names_on_platform", lambda names: set())
+        monkeypatch.setattr(deadtrees_seam, "platform_footprints", lambda: [(7, "BOX(0 0,1 1)", "2026-09-10")])
+        gate = pd.DataFrame([_row(filename=n, bbox=b, acquisition_date=d) for n, b, d in rows])
+        prep = oam_weekly.prepare_candidates(gate, set(), tmp_path, server_check=True, allow_overlap={"E.tif"})
+        assert [spec.filename for spec in prep.specs] == ["b.tif", "c.tif", "e.tif"]
+        assert prep.held == 2
 
     def test_missing_tiff_and_bad_metadata_are_rejected(self, tmp_path):
         self._tifs(tmp_path, "a.tif")

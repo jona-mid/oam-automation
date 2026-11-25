@@ -88,7 +88,7 @@ def normalize_timestamps(df):
     return df
 
 
-def _overlap(a, b):
+def bbox_overlap(a, b):
     """Intersection area over the smaller bbox's area."""
     w = min(a[2], b[2]) - max(a[0], b[0])
     h = min(a[3], b[3]) - max(a[1], b[1])
@@ -111,7 +111,7 @@ def drop_mirrored_uploads(df, min_overlap=0.5):
     def mirrored(row):
         title = row["title"].strip().lower() if isinstance(row["title"], str) else None
         box = (row["bbox_min_lon"], row["bbox_min_lat"], row["bbox_max_lon"], row["bbox_max_lat"])
-        return any(_overlap(box, other) >= min_overlap for other in legacy_by_title.get(title, []))
+        return any(bbox_overlap(box, other) >= min_overlap for other in legacy_by_title.get(title, []))
     drop = new & df.apply(mirrored, axis=1)
     if drop.any():
         print(f"Dropped {int(drop.sum())} uploader items also listed as a legacy item")

@@ -102,6 +102,39 @@ def file_hashes_on_platform(hashes: List[str]) -> Any:
     return found
 
 
+def platform_footprints() -> List[Tuple[int, str, Optional[str]]]:
+    """(dataset_id, bbox text, capture date YYYY-MM-DD or None) for every live dataset.
+
+    The bbox comes from orthos ("BOX(minx miny,maxx maxy)"); a dataset without
+    a processed ortho has none and is left out. Readable with the anon key.
+    """
+    _, use_client, settings = _platform_api()
+
+    def every_row(client, table, columns, order):
+        rows, start = [], 0
+        while True:
+            page = client.table(table).select(columns).order(order).range(start, start + 999).execute().data
+            rows += page
+            start += 1000
+            if len(page) < 1000:
+                return rows
+
+    with use_client(os.environ["SUPABASE_KEY"]) as client:
+        boxes = {r["dataset_id"]: r["bbox"] for r in every_row(client, settings.orthos_table, "dataset_id,bbox", "dataset_id")
+                 if r.get("bbox")}
+        datasets = every_row(client, settings.datasets_table,
+                             "id,archived,aquisition_year,aquisition_month,aquisition_day", "id")
+
+    def capture_date(row):
+        try:
+            return f"{int(row['aquisition_year']):04d}-{int(row['aquisition_month']):02d}-{int(row['aquisition_day']):02d}"
+        except (TypeError, ValueError):
+            return None
+
+    return [(row["id"], boxes[row["id"]], capture_date(row))
+            for row in datasets if not row.get("archived") and row["id"] in boxes]
+
+
 def upload_and_process(
     file_path: Path,
     authors: List[str],

@@ -2,7 +2,8 @@
 """Weekly wrapper: run the pipeline, gate candidates, upload via deadtrees-cli, update the ledger.
 
 Steps: pipeline subprocess -> VLM gate (in_season AND leaf_on AND review success)
--> dedup (ledger CSV, server-side file_name check, content hash) -> upload each
+-> dedup (ledger CSV, rejection list, server-side file_name check, content hash,
+footprint + capture date) -> upload each
 candidate -> append canonical rows to the ledger -> status file.
 
 Machine-specific configuration (ledger path, credentials) lives in the
@@ -25,6 +26,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 import deadtrees_seam
+from scrape import bbox_overlap
 
 ROOT = Path(__file__).resolve().parent
 
@@ -50,6 +52,7 @@ class RunCounts:
     failed: int = 0
     rejected: int = 0
     skipped: int = 0  # already on the platform; the server rejected the upload as a duplicate
+    held: int = 0  # possible copy of a platform dataset or another candidate; needs a look
 
 
 class UploadSpec(NamedTuple):
@@ -64,6 +67,7 @@ class Preparation:
     candidates: int = 0
     specs: List[UploadSpec] = field(default_factory=list)
     rejected: int = 0
+    held: int = 0
 
 
 def normalize_filename(value) -> str:
@@ -536,6 +540,7 @@ def write_status(
         f"failed: {counts.failed}",
         f"skipped: {counts.skipped}",
         f"rejected: {counts.rejected}",
+        f"held: {counts.held}",
         f"exit: {exit_status}",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -570,6 +575,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--skip-server-check",
         action="store_true",
         help="Skip the server-side duplicate check (diff leg 2)",
+    )
+    parser.add_argument(
+        "--allow-overlap",
+        action="append",
+        default=[],
+        metavar="FILENAME",
+        help="Upload this candidate even though its footprint and date match another dataset (after a look); repeatable",
     )
     parser.add_argument(
         "--max-uploads",
@@ -617,6 +629,91 @@ def resolve_uploaded_after(explicit: Optional[str], status_file: Path) -> Option
     return None
 
 
+COPY_MIN_OVERLAP = 0.5  # share of the smaller footprint
+COPY_MAX_DAYS = 31
+
+
+def parse_bbox(value) -> Optional[tuple]:
+    """(minx, miny, maxx, maxy) from '[a, b, c, d]' or 'BOX(a b,c d)', else None."""
+    numbers = re.findall(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", str(value)) if isinstance(value, str) else []
+    if len(numbers) < 4:
+        return None
+    box = tuple(float(n) for n in numbers[:4])
+    return box if box[0] < box[2] and box[1] < box[3] else None
+
+
+def _footprint(row) -> tuple:
+    """(bbox, capture date) of a gate row; either may be None."""
+    captured = None
+    for column in ("acquisition_date", "capture_date"):
+        value = row.get(column)
+        if isinstance(value, str) and value[:10]:
+            try:
+                captured = date.fromisoformat(value[:10])
+                break
+            except ValueError:
+                pass
+    return parse_bbox(row.get("bbox")), captured
+
+
+def _same_flight(box, captured, other_box, other_captured) -> Optional[float]:
+    """Overlap share when two footprints look like one flight (same area, close dates), else None."""
+    if not (box and other_box and captured and other_captured):
+        return None
+    if abs((captured - other_captured).days) > COPY_MAX_DAYS:
+        return None
+    share = bbox_overlap(box, other_box)
+    return share if share >= COPY_MIN_OVERLAP else None
+
+
+def hold_possible_copies(candidates: list, platform_check: bool, allow: Set[str]) -> tuple:
+    """Hold back candidates that look like a copy of a platform dataset or of a
+    larger candidate in this run (same area, captured within COPY_MAX_DAYS).
+
+    Copies uploaded separately to OAM (re-georeferenced, cropped, mosaicked)
+    differ in bytes, so the name and hash checks miss them. A held image is
+    not uploaded; after a look, `--allow-overlap FILE` lets it through.
+    Returns (kept, held_count).
+    """
+    platform = []
+    if platform_check:
+        try:
+            platform = [(dataset_id, parse_bbox(box), date.fromisoformat(day) if day else None)
+                        for dataset_id, box, day in deadtrees_seam.platform_footprints()]
+        except Exception as error:
+            print(f"  ! Footprint check against the platform unavailable ({error}); skipping that leg")
+
+    def area(row):
+        box = _footprint(row)[0]
+        return (box[2] - box[0]) * (box[3] - box[1]) if box else 0.0
+
+    kept, held = [], 0
+    # Larger footprints first, so a mosaic is kept and its parts are held.
+    for row in sorted(candidates, key=area, reverse=True):
+        filename = normalize_filename(row["filename"])
+        box, captured = _footprint(row)
+        reason = None
+        if filename not in allow:
+            for dataset_id, other_box, other_captured in platform:
+                share = _same_flight(box, captured, other_box, other_captured)
+                if share is not None:
+                    reason = f"dataset {dataset_id} on the platform ({share:.0%} overlap, captured {other_captured})"
+                    break
+            for other in kept if reason is None else []:
+                share = _same_flight(box, captured, *_footprint(other))
+                if share is not None:
+                    reason = f"{normalize_filename(other['filename'])} in this run ({share:.0%} overlap)"
+                    break
+        if reason:
+            print(f"  ~ {filename} (captured {captured}) looks like a copy of {reason}; held back, "
+                  f"upload with --allow-overlap {filename} if it is not")
+            held += 1
+        else:
+            kept.append(row)
+    order = {id(row): i for i, row in enumerate(candidates)}
+    return sorted(kept, key=lambda row: order[id(row)]), held
+
+
 def prepare_candidates(
     gate: pd.DataFrame,
     ledger: Set[str],
@@ -624,6 +721,7 @@ def prepare_candidates(
     server_check: bool,
     build_kwargs=build_upload_kwargs,
     accessed: Optional[date] = None,
+    allow_overlap: Set[str] = frozenset(),
 ) -> Preparation:
     """Diff gate rows against the ledger and the platform, then build upload specs.
 
@@ -691,6 +789,11 @@ def prepare_candidates(
                 kept.append(row)
             candidates = kept
 
+    held = 0
+    if candidates:
+        candidates, held = hold_possible_copies(
+            candidates, server_check, {normalize_filename(name) for name in allow_overlap})
+
     specs: List[UploadSpec] = []
     rejected = 0
     for row in candidates:
@@ -708,7 +811,7 @@ def prepare_candidates(
             continue
         specs.append(UploadSpec(filename=filename, tif_path=tif_path, kwargs=kwargs,
                                 file_hash=hashes.get(filename)))
-    return Preparation(candidates=len(candidates), specs=specs, rejected=rejected)
+    return Preparation(candidates=len(candidates), specs=specs, rejected=rejected, held=held)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -803,11 +906,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         gate = load_gate_candidates(run_dir)
         ledger = load_skip_filenames(args.uploaded_csv)
         prep = prepare_candidates(gate, ledger, run_dir, server_check=not args.skip_server_check,
-                                  accessed=file_date(run_dir / "raw" / "openaerial_data.csv"))
+                                  accessed=file_date(run_dir / "raw" / "openaerial_data.csv"),
+                                  allow_overlap=set(args.allow_overlap))
         counts.candidates = prep.candidates
         counts.rejected = prep.rejected
+        counts.held = prep.held
         print(f"Gate passed {len(gate)} images; {prep.candidates} left after dedup "
-              "(ledger, rejection list, platform file_name, content hash).")
+              f"(ledger, rejection list, platform file_name, content hash, footprint; {prep.held} held as possible copies).")
 
         if args.dry_run:
             print(f"Dry run: {len(prep.specs)} would-be uploads, zero upload calls.")
@@ -823,7 +928,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(
                 f"Summary: {counts.candidates} candidates, {counts.uploaded} uploaded, "
                 f"{counts.failed} failed, {counts.skipped} skipped (already on the platform), "
-                f"{counts.rejected} rejected (bad metadata, not retried)."
+                f"{counts.rejected} rejected (bad metadata, not retried), "
+                f"{counts.held} held (possible copies, not uploaded)."
             )
             if counts.skipped:
                 print(f"  {counts.skipped} upload(s) skipped: the platform already holds these files.")

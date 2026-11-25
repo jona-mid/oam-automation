@@ -442,8 +442,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             # started_at is written with the catalog fetch
             accessed=date.fromisoformat(manifest["started_at"][:10]) if manifest.get("started_at") else None,
         )
-        counts.candidates, counts.rejected = prep.candidates, prep.rejected
-        print(f"Gate passed {len(gate)} images; {prep.candidates} left after dedup (ledger, rejection list, platform file_name, content hash).")
+        counts.candidates, counts.rejected, counts.held = prep.candidates, prep.rejected, prep.held
+        print(f"Gate passed {len(gate)} images; {prep.candidates} left after dedup "
+              f"(ledger, rejection list, platform file_name, content hash, footprint; {prep.held} held as possible copies).")
 
         if args.dry_run:
             print(f"Dry run: {len(prep.specs)} would-be uploads, zero upload calls.")
