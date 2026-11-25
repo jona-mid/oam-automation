@@ -85,6 +85,7 @@ def main():
     parser.add_argument("--pad-days", type=int, default=30)
     parser.add_argument("--tif-workers", type=int, default=8)
     parser.add_argument("--jpeg-workers", type=int, default=8)
+    parser.add_argument("--skip-csv", action="append", default=[], help="Passed to download.py: files listed here are not downloaded")
     # Any OpenAI-compatible chat-completions endpoint works (OpenRouter by
     # default, e.g. Requesty via .env). The key flag takes the name of the
     # environment variable, so the key itself never lands in the manifest.
@@ -158,7 +159,8 @@ def main():
     # resumed run completes a download that died partway instead of silently
     # continuing with a partial set. Only in-season images can pass the
     # upload gate, so out-of-season TIFFs are never fetched.
-    run("download.py", "--csv", pheno_csv, "--season", "in_season", "--output-dir", tifs, "--workers", args.tif_workers, cwd=output)
+    skip = [arg for path in args.skip_csv for arg in ("--skip-csv", path)]
+    run("download.py", "--csv", pheno_csv, "--season", "in_season", "--output-dir", tifs, "--workers", args.tif_workers, *skip, cwd=output)
     manifest["stages"]["tifs"] = {"files": count_files(tifs, {".tif", ".tiff"}), "output": str(tifs)}
     if not manifest["stages"]["tifs"]["files"]:
         return finish("no GeoTIFFs downloaded")

@@ -19,7 +19,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, List, NamedTuple, Optional, Set
+from typing import Any, List, NamedTuple, Optional, Sequence, Set
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -85,8 +85,11 @@ def run_pipeline(
     run_dir: Path,
     uploaded_after: Optional[str] = None,
     uploaded_before: Optional[str] = None,
+    skip_csvs: Sequence[Path] = (),
 ) -> None:
     command = [sys.executable, str(repo_root / "pipeline.py"), "--output-dir", str(run_dir)]
+    for path in skip_csvs:
+        command += ["--skip-csv", str(path)]
     if uploaded_after:
         command += ["--uploaded-after-date", uploaded_after]
     if uploaded_before:
@@ -142,7 +145,11 @@ def load_skip_filenames(ledger_csv: Path) -> Set[str]:
     The rejection list is `metadata_rejected.csv` next to the ledger
     (columns filename, reason, rejected_on), kept by hand.
     """
-    return load_ledger_filenames(ledger_csv) | load_ledger_filenames(ledger_csv.with_name("metadata_rejected.csv"))
+    return load_ledger_filenames(ledger_csv) | load_ledger_filenames(rejected_csv(ledger_csv))
+
+
+def rejected_csv(ledger_csv: Path) -> Path:
+    return ledger_csv.with_name("metadata_rejected.csv")
 
 
 def scrape_uploaded_at(run_dir: Path) -> Optional[str]:
@@ -790,7 +797,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                         )
 
         if not args.dry_run:
-            run_pipeline(ROOT, run_dir, uploaded_after, args.uploaded_before)
+            run_pipeline(ROOT, run_dir, uploaded_after, args.uploaded_before,
+                         skip_csvs=[args.uploaded_csv, rejected_csv(args.uploaded_csv)])
 
         gate = load_gate_candidates(run_dir)
         ledger = load_skip_filenames(args.uploaded_csv)

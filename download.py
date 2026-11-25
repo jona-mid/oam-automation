@@ -27,6 +27,12 @@ def main(argv=None):
         help="Only rows with this pheno_season (column written by phenology.py)",
     )
     parser.add_argument("--workers", type=int, default=8, help="Parallel workers")
+    parser.add_argument(
+        "--skip-csv",
+        action="append",
+        default=[],
+        help="CSV with a 'filename' column whose files are not downloaded (upload ledger, rejection list); repeatable",
+    )
     args = parser.parse_args(argv)
 
     logger = configure_download_logging("tif_download.log")
@@ -48,18 +54,28 @@ def main(argv=None):
     state_file = os.path.join(args.output_dir, ".download_state.json")
     downloaded_files = load_download_state(state_file)
 
+    known = set()
+    for path in args.skip_csv:
+        if os.path.exists(path):
+            known |= set(pd.read_csv(path, dtype=str)["filename"].dropna().str.strip().str.lower())
+
     tasks = []
-    skipped = 0
+    skipped = known_skipped = 0
     rows = df.dropna(subset=["uuid"]).drop_duplicates("uuid")
     for url, name in zip(rows["uuid"], rows.get("filename", [None] * len(rows))):
         # phenology.py's `filename` column wins (STAC uploads are named by item id).
         tif_filename = name if isinstance(name, str) and name else extract_filename_from_url(url, ".tif")
+        if tif_filename.lower() in known:
+            known_skipped += 1  # already uploaded or rejected; the upload dedup would drop it anyway
+            continue
         output_path = os.path.join(args.output_dir, tif_filename)
         if tif_filename in downloaded_files and os.path.exists(output_path):
             skipped += 1
             continue
         tasks.append((url, output_path, tif_filename))
 
+    if known_skipped:
+        logger.info(f"{known_skipped} files skipped: already in the ledger or on the rejection list")
     if not tasks:
         logger.info(f"No files to download ({skipped} already downloaded)")
         return 0

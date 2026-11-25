@@ -271,7 +271,7 @@ class TestMain:
                 f"timestamp: 2026-09-06T10:00:00\nscrape_uploaded_at: {chain}\n", encoding="utf-8")
 
     def _stub(self, monkeypatch, prep=oam_weekly.Preparation(0, [], 0), captured=None):
-        def fake_run_pipeline(repo_root, run_dir, uploaded_after, uploaded_before=None):
+        def fake_run_pipeline(repo_root, run_dir, uploaded_after, uploaded_before=None, skip_csvs=()):
             if captured is not None:
                 captured.update(after=uploaded_after, before=uploaded_before)
 
