@@ -232,6 +232,15 @@ def test_advance_scrape_uploaded_at():
         assert (value, warning is not None) == (expected, warns), (stored, scraped, after)
 
 
+def test_skip_list_adds_the_manual_rejections_next_to_the_ledger(tmp_path):
+    ledger = tmp_path / "metadata_uploaded.csv"
+    assert oam_weekly.load_skip_filenames(ledger) == set()
+    ledger.write_text("filename,license\nA.tif,CC BY\n", encoding="utf-8")
+    (tmp_path / "metadata_rejected.csv").write_text(
+        "filename,reason,rejected_on\nb.tif,too few trees,2026-11-25\n", encoding="utf-8")
+    assert oam_weekly.load_skip_filenames(ledger) == {"a.tif", "b.tif"}
+
+
 def test_ledger_path_comes_from_flag_or_env(monkeypatch):
     monkeypatch.setenv("OAM_UPLOADED_CSV", "env.csv")
     assert oam_weekly.parse_args([]).uploaded_csv == Path("env.csv")

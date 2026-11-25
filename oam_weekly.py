@@ -136,6 +136,15 @@ def load_ledger_filenames(csv_path: Path) -> Set[str]:
     return {normalize_filename(name) for name in df["filename"].dropna()}
 
 
+def load_skip_filenames(ledger_csv: Path) -> Set[str]:
+    """Ledger filenames plus those rejected in a manual review.
+
+    The rejection list is `metadata_rejected.csv` next to the ledger
+    (columns filename, reason, rejected_on), kept by hand.
+    """
+    return load_ledger_filenames(ledger_csv) | load_ledger_filenames(ledger_csv.with_name("metadata_rejected.csv"))
+
+
 def scrape_uploaded_at(run_dir: Path) -> Optional[str]:
     """Newest OAM upload date this run's scrape saw (uploaded_at column of the scrape CSV).
 
@@ -784,12 +793,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             run_pipeline(ROOT, run_dir, uploaded_after, args.uploaded_before)
 
         gate = load_gate_candidates(run_dir)
-        ledger = load_ledger_filenames(args.uploaded_csv)
+        ledger = load_skip_filenames(args.uploaded_csv)
         prep = prepare_candidates(gate, ledger, run_dir, server_check=not args.skip_server_check,
                                   accessed=file_date(run_dir / "raw" / "openaerial_data.csv"))
         counts.candidates = prep.candidates
         counts.rejected = prep.rejected
-        print(f"Gate passed {len(gate)} images; {prep.candidates} left after dedup (ledger, platform file_name, content hash).")
+        print(f"Gate passed {len(gate)} images; {prep.candidates} left after dedup "
+              "(ledger, rejection list, platform file_name, content hash).")
 
         if args.dry_run:
             print(f"Dry run: {len(prep.specs)} would-be uploads, zero upload calls.")

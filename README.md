@@ -40,7 +40,8 @@ scrape -> filter -> phenology -> TIFFs -> JPEGs -> VLM check -> upload filter ->
 
 - **Scrape:** the OAM STAC catalog (`api.imagery.hotosm.org/stac`, collection `openaerialmap`); the legacy `api.openaerialmap.org/meta` stopped listing most new uploads in autumn 2026. Uploads made with the new OAM uploader are downloaded as their untouched `original` file and named `<item id>.tif`; items mirrored from the legacy catalog keep their old file names. An uploader item that is also listed as a legacy item (same title, overlapping footprint) is dropped in favour of the legacy copy.
 - **Upload filter:** drone/aircraft imagery under 10 cm GSD, MODIS in season (leaf-on window ±30 days), VLM `leaf_on`. The license comes from the OAM record; images with an unknown license or incomplete metadata are rejected.
-- **Duplicate checks:** the ledger, the filename on the platform, and the file hash against the platform's `orthos` table.
+- **Duplicate checks:** the ledger, the rejection list, the filename on the platform, and the file hash against the platform's `orthos` table.
+- **Rejection list:** `metadata_rejected.csv` next to the ledger (`filename,reason,rejected_on`) holds images rejected in a manual review; runs skip them like ledger entries. Add a row by hand for each image you turn down.
 
 ## Operations
 
