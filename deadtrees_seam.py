@@ -13,7 +13,6 @@ import os
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"
 
-TASK_TYPES = ["geotiff", "metadata", "cog", "thumbnail", "deadwood_v1", "treecover_v1"]
 PROCESS_PRIORITY = 2
 HASH_QUERY_CHUNK = 50
 
@@ -163,7 +162,7 @@ def upload_and_process(
         citation_doi=citation_doi,
     )
     dataset_id = int(dataset["id"])
-    dc.process(dataset_id=dataset_id, task_types=TASK_TYPES, priority=PROCESS_PRIORITY)
+    dc.process(dataset_id=dataset_id, priority=PROCESS_PRIORITY)
     return dataset_id
 
 
@@ -189,7 +188,7 @@ def duplicate_upload_detail(error: Exception) -> Optional[dict]:
 def start_processing(dataset_id: int) -> None:
     """Queue processing for an uploaded dataset (the second half of upload_and_process)."""
     DataCommands, _, _ = _platform_api()
-    DataCommands().process(dataset_id=dataset_id, task_types=TASK_TYPES, priority=PROCESS_PRIORITY)
+    DataCommands().process(dataset_id=dataset_id, priority=PROCESS_PRIORITY)
 
 
 def find_dataset(filename: str, created_after: str) -> Optional[dict]:
